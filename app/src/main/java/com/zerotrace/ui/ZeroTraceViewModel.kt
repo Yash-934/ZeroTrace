@@ -192,7 +192,13 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
 
             if (storedIdentityBytes != null) {
                 val summary = RustCoreBridge.restoreWrappedIdentity(storedIdentityBytes)
-                val contacts = loadEncryptedContactsFromDisk()
+                TorOnionTransportManager.bootstrapTorAndStartOnionService()
+                val loadedContacts = loadEncryptedContactsFromDisk()
+                val contacts = loadedContacts.map { TorOnionTransportManager.normalizeLoopbackContactIfNeeded(it) }
+                if (contacts != loadedContacts) {
+                    saveEncryptedContactsToDisk(contacts)
+                }
+                contacts.forEach { seedLoopbackPeerEphemeralStatusIfNeeded(it) }
                 _uiState.update {
                     it.copy(
                         currentScreen = ZeroTraceScreen.HOME,
@@ -204,7 +210,9 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                         backupAuditStatus = backupAudit
                     )
                 }
-                TorOnionTransportManager.bootstrapTorAndStartOnionService()
+                if (contacts.isNotEmpty()) {
+                    establishWarmSessionInBackground(contacts.first())
+                }
             } else {
                 _uiState.update {
                     it.copy(
@@ -664,6 +672,28 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             )
         }
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            establishWarmSessionInBackground(newRecord)
+        }
+    }
+
+    private suspend fun establishWarmSessionInBackground(contact: VerifiedContactRecord) {
+        val normalized = TorOnionTransportManager.normalizeLoopbackContactIfNeeded(contact)
+        val res = TorOnionTransportManager.establishAuthenticatedPeerSession(normalized)
+        res.onSuccess { handle ->
+            val volatileMsgs = RustCoreBridge.getVolatileMessages(handle)
+            val metrics = RustCoreBridge.getSessionMetrics(handle)
+            syncVolatileMessagesToRichConversation(normalized.onionAddress, volatileMsgs)
+            _uiState.update { state ->
+                state.copy(
+                    activeSessionHandle = handle,
+                    activePeerContact = normalized,
+                    activeChatMessages = volatileMsgs,
+                    activeRatchetMetrics = metrics,
+                    errorBannerMessage = null
+                )
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -671,38 +701,66 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
     // -------------------------------------------------------------------------
 
     fun startAuthenticatedSessionWithContact(contact: VerifiedContactRecord) {
-        if (contact.onionAddress in _uiState.value.blockedOnions) {
+        val normalizedContact = TorOnionTransportManager.normalizeLoopbackContactIfNeeded(contact)
+        if (normalizedContact.onionAddress in _uiState.value.blockedOnions) {
             _uiState.update {
-                it.copy(errorBannerMessage = "Cannot start session: '${contact.alias}' is currently blocked.")
+                it.copy(errorBannerMessage = "Cannot start session: '${normalizedContact.alias}' is currently blocked.")
             }
             return
+        }
+
+        // If a warm session is already active for this peer, open CHAT immediately
+        val existingHandle = _uiState.value.activeSessionHandle
+        val existingPeer = _uiState.value.activePeerContact
+        if (existingHandle != null && existingPeer != null &&
+            existingPeer.onionAddress.equals(normalizedContact.onionAddress, ignoreCase = true)
+        ) {
+            val volatileMsgs = RustCoreBridge.getVolatileMessages(existingHandle)
+            val metrics = RustCoreBridge.getSessionMetrics(existingHandle)
+            if (metrics != null) {
+                _uiState.update { state ->
+                    val clearedUnread = state.unreadCountByOnion.toMutableMap().apply {
+                        put(normalizedContact.onionAddress, 0)
+                    }
+                    state.copy(
+                        activePeerContact = normalizedContact,
+                        activeChatMessages = volatileMsgs,
+                        activeRatchetMetrics = metrics,
+                        unreadCountByOnion = clearedUnread,
+                        currentScreen = ZeroTraceScreen.CHAT,
+                        statusBannerMessage = null,
+                        errorBannerMessage = null
+                    )
+                }
+                return
+            }
         }
 
         viewModelScope.launch {
             _uiState.update {
                 it.copy(
                     statusBannerMessage = isHi(
-                        "${contact.alias} के साथ हाइब्रिड PQ हैंडशेक स्थापित किया जा रहा है…",
-                        "Establishing ZT-PQXDH-P2P-v1 hybrid handshake with ${contact.alias}…"
+                        "${normalizedContact.alias} के साथ हाइब्रिड PQ हैंडशेक स्थापित किया जा रहा है…",
+                        "Establishing ZT-PQXDH-P2P-v1 hybrid handshake with ${normalizedContact.alias}…"
                     ),
                     errorBannerMessage = null
                 )
             }
             SessionService.startServiceIfPermitted(appContext)
-            val result = TorOnionTransportManager.establishAuthenticatedPeerSession(contact)
+            val result = TorOnionTransportManager.establishAuthenticatedPeerSession(normalizedContact)
             result.fold(
                 onSuccess = { handle ->
                     val volatileMsgs = RustCoreBridge.getVolatileMessages(handle)
                     val metrics = RustCoreBridge.getSessionMetrics(handle)
-                    syncVolatileMessagesToRichConversation(contact.onionAddress, volatileMsgs)
+                    syncVolatileMessagesToRichConversation(normalizedContact.onionAddress, volatileMsgs)
 
                     _uiState.update { state ->
                         val clearedUnread = state.unreadCountByOnion.toMutableMap().apply {
-                            put(contact.onionAddress, 0)
+                            put(normalizedContact.onionAddress, 0)
                         }
                         state.copy(
                             activeSessionHandle = handle,
-                            activePeerContact = contact,
+                            activePeerContact = normalizedContact,
                             activeChatMessages = volatileMsgs,
                             activeRatchetMetrics = metrics,
                             unreadCountByOnion = clearedUnread,
@@ -1381,16 +1439,29 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun retryTorBootstrap() {
-        viewModelScope.launch {
-            TorOnionTransportManager.bootstrapTorAndStartOnionService()
+        _uiState.update { it.copy(errorBannerMessage = null, statusBannerMessage = null) }
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val ok = TorOnionTransportManager.bootstrapTorAndStartOnionService()
+            if (ok) {
+                val firstContact = _uiState.value.verifiedContacts.firstOrNull()
+                if (firstContact != null) {
+                    establishWarmSessionInBackground(firstContact)
+                }
+            }
         }
     }
 
     fun setTransportBackend(backend: TorTransportBackend, customSocksPort: Int = _uiState.value.socksPort) {
         TorOnionTransportManager.configureTransportBackend(backend, customSocksPort)
-        _uiState.update { it.copy(socksPort = customSocksPort) }
-        viewModelScope.launch {
-            TorOnionTransportManager.bootstrapTorAndStartOnionService()
+        _uiState.update { it.copy(socksPort = customSocksPort, errorBannerMessage = null) }
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val ok = TorOnionTransportManager.bootstrapTorAndStartOnionService()
+            if (ok) {
+                val firstContact = _uiState.value.verifiedContacts.firstOrNull()
+                if (firstContact != null) {
+                    establishWarmSessionInBackground(firstContact)
+                }
+            }
         }
     }
 
