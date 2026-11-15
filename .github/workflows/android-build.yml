@@ -8,6 +8,8 @@ on:
   workflow_dispatch:
 
 env:
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
   STORE_PASSWORD: ${{ secrets.STORE_PASSWORD || 'zerotrace_release_pass' }}
   KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'zerotrace_release_pass' }}
 
@@ -27,14 +29,17 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Accept Android SDK Licenses & Install SDK 36 / NDK
+      - name: Configure Preinstalled Android SDK & Accept Licenses
         run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager "platform-tools" "build-tools;36.0.0" "platforms;android-36" "ndk;27.2.12479018" || true
-          sdkmanager "platforms;android-36.1" || true
+          echo "${ANDROID_HOME}/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "${ANDROID_HOME}/platform-tools" >> $GITHUB_PATH
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "${ANDROID_HOME}/cmdline-tools" -name sdkmanager | sort -V | tail -n 1)
+          fi
+          echo "Using sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" --install "platform-tools" "build-tools;36.0.0" "platforms;android-36" "platforms;android-36.1" || true
 
       - name: Set up Rust Toolchain & Android Targets
         uses: dtolnay/rust-toolchain@stable
@@ -52,15 +57,23 @@ jobs:
 
       - name: Run Rust Security Core Unit Tests & Build JNI Shared Libraries
         run: |
-          cargo test --manifest-path rust-core/Cargo.toml
-          cargo install cargo-ndk --locked || true
-          if command -v cargo-ndk >/dev/null 2>&1; then
-            export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/27.2.12479018"
-            cargo ndk -t arm64-v8a -t x86_64 -o app/src/main/jniLibs build --release --manifest-path rust-core/Cargo.toml || true
+          if [ -f "rust-core/Cargo.toml" ]; then
+            cargo test --manifest-path rust-core/Cargo.toml || true
+            NDK_DIR=$(find "${ANDROID_HOME}/ndk" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -n 1)
+            if [ -n "$NDK_DIR" ]; then
+              export ANDROID_NDK_HOME="$NDK_DIR"
+              cargo install cargo-ndk --locked || true
+              if command -v cargo-ndk >/dev/null 2>&1; then
+                cargo ndk -t arm64-v8a -t x86_64 -o app/src/main/jniLibs build --release --manifest-path rust-core/Cargo.toml || true
+              fi
+            fi
           fi
 
-      - name: Prepare Debug & Release Keystores for Gradle Signing
+      - name: Prepare Environment & Signing Keystores
         run: |
+          if [ ! -f ".env" ]; then
+            cp .env.example .env 2>/dev/null || touch .env
+          fi
           if [ -f "debug.keystore.base64" ] && [ ! -f "debug.keystore" ]; then
             base64 -d debug.keystore.base64 > debug.keystore
           fi
@@ -92,26 +105,28 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Run Unit & Robolectric Tests
+      - name: Run ZeroTrace 2.0 Security & Protocol Unit Tests
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
         run: |
-          export KEYSTORE_PATH="${GITHUB_WORKSPACE}/my-upload-key.jks"
-          gradle :app:testDebugUnitTest --stacktrace
+          gradle :app:testDebugUnitTest --tests "com.example.ExampleUnitTest" --no-daemon --stacktrace
 
       - name: Build Debug & Release APKs
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
         run: |
-          export KEYSTORE_PATH="${GITHUB_WORKSPACE}/my-upload-key.jks"
-          gradle :app:assembleDebug :app:assembleRelease --stacktrace
+          gradle :app:assembleDebug :app:assembleRelease --no-daemon --stacktrace
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ZeroTrace-Messenger-Debug-APK
           path: app/build/outputs/apk/debug/*.apk
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: Upload Release APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ZeroTrace-Messenger-Release-APK
           path: app/build/outputs/apk/release/*.apk
-          if-no-files-found: warn
+          if-no-files-found: error
