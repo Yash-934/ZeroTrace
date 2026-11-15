@@ -1,0 +1,20 @@
+<resources>
+    <string name="app_name">ZeroTrace</string>
+    <string name="tagline">Private Communication. No Central Server. No Persistent Conversations.</string>
+    <string name="splash_initializing">Initializing Hardware Keystore &amp; Cryptographic Core…</string>
+    <string name="onboarding_title">STRICT EPHEMERAL ARCHITECTURE</string>
+    <string name="onboarding_rule_1">No phone number, email, or central account registry required.</string>
+    <string name="onboarding_rule_2">No company-operated central messaging server or cloud database.</string>
+    <string name="onboarding_rule_3">Both participants must be online simultaneously over Tor Onion Services.</string>
+    <string name="onboarding_rule_4">Conversations exist strictly in volatile RAM and vanish on disconnect.</string>
+    <string name="onboarding_rule_5">Tor Onion routing introduces latency and depends on circuit availability.</string>
+    <string name="onboarding_rule_6">No software can guarantee protection against a compromised OS kernel or live hardware forensics.</string>
+    <string name="onboarding_accept_checkbox">I understand and accept these operational and security limitations.</string>
+    <string name="onboarding_continue">Proceed to Identity Generation</string>
+    <string name="identity_creation_title">DUAL POST-QUANTUM IDENTITY</string>
+    <string name="identity_generate_btn">Generate Protected Device Identity</string>
+    <string name="emergency_lock">EMERGENCY LOCK / WIPE</string>
+    <string name="notification_channel_name">ZeroTrace Ephemeral Circuit</string>
+    <string name="notification_active_title">ZeroTrace Ephemeral Session Active</string>
+    <string name="notification_active_body">Tap to return or terminate active volatile session.</string>
+</resources>

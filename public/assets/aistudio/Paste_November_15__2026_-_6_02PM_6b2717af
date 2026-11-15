@@ -1,0 +1,1157 @@
+PROJECT: ZEROTRACE MESSENGER 2.0
+
+ROLE AND RESPONSIBILITY
+
+Act as a principal Android architect, senior Rust engineer, applied cryptographer, Tor networking engineer, and mobile application security researcher.
+
+Your responsibility is to design, develop, test, and deliver a complete native Android application named:
+
+ZeroTrace Messenger
+
+Tagline: Private Communication. No Central Server. No Persistent Conversations.
+
+This is not a UI prototype or a theoretical architecture exercise.
+
+You must produce an actual, maintainable, buildable Android project with real functionality.
+
+The application must prioritize:
+
+1. Post-quantum-resistant cryptographic architecture.
+2. End-to-end encrypted communication.
+3. Serverless application-level architecture.
+4. Tor-based peer-to-peer networking.
+5. Minimal metadata exposure.
+6. Ephemeral message handling.
+7. Android hardware-backed key protection.
+8. Strict failure handling.
+9. Independently testable security properties.
+
+Never pretend that a feature works when it is only a placeholder.
+
+Never claim that an application is quantum-proof, Pegasus-proof, Cellebrite-proof, or completely untraceable.
+
+Security claims must be supported by implementation details and test results.
+
+---
+
+SECTION 1: PRODUCT DEFINITION
+
+Build a one-to-one private messaging application for Android.
+
+The application must not require:
+
+- A phone number.
+- An email address.
+- A username registered with a central service.
+- A centralized authentication provider.
+- A company-operated messaging server.
+- A cloud database.
+- Firebase.
+- Google Sign-In.
+- A centralized contact discovery service.
+
+Each device independently generates its cryptographic identity.
+
+Users establish contact through an authenticated QR-code exchange.
+
+Communication occurs through Tor Onion Services.
+
+The two participants must be online simultaneously in the initial release.
+
+Messages must exist only in volatile application memory.
+
+When a user disconnects or the session terminates, the application must clear its active session data on a best-effort basis.
+
+Initial Product Mode
+
+Implement:
+
+STRICT EPHEMERAL MODE.
+
+Features:
+
+- One-to-one text communication.
+- QR-based contact pairing.
+- Cryptographic identity verification.
+- Tor connectivity.
+- End-to-end encryption.
+- Post-quantum key agreement.
+- Ratcheted message encryption.
+- RAM-only conversation history.
+- Manual session termination.
+- Automatic session timeout.
+- No offline message queue.
+- No cloud synchronization.
+
+Do not implement groups, audio calls, video calls, file sharing, or persistent message history in the MVP.
+
+These may be introduced in future versions after the security architecture is established.
+
+---
+
+SECTION 2: MANDATORY TECH STACK
+
+Use a native Android architecture.
+
+Android Application
+
+- Kotlin
+- Jetpack Compose
+- Material 3
+- Coroutines
+- StateFlow
+- Android Keystore
+- Android NDK
+- Foreground Service, only where justified and permitted
+- CameraX or an appropriate maintained QR scanner library
+
+Minimum Android version: API 26.
+
+Support modern Android versions through the latest stable SDK compatible with the development environment.
+
+Verify current Android SDK, Gradle, Android Gradle Plugin, Kotlin and Compose compatibility before selecting versions.
+
+Security Core
+
+Use Rust.
+
+Compile Rust into Android native libraries:
+
+"libzerotrace_core.so"
+
+Use:
+
+- Cargo
+- Android NDK
+- cargo-ndk, where compatible
+- Mozilla UniFFI or another suitable maintained FFI solution
+
+Keep sensitive cryptographic operations inside the Rust security core as far as practical.
+
+Kotlin should handle:
+
+- UI.
+- Android lifecycle.
+- Permissions.
+- Keystore integration.
+- Camera.
+- Notifications.
+- User interactions.
+
+Rust should handle:
+
+- Cryptographic primitives.
+- Key agreement.
+- Message encryption.
+- Ratchet state.
+- Secure session management.
+- Network protocol processing.
+- Tor integration.
+
+Expose opaque session handles through the Rust/Kotlin bridge.
+
+Do not expose private cryptographic keys to UI components.
+
+Document unavoidable plaintext and key copies across JNI/FFI boundaries.
+
+---
+
+SECTION 3: CRYPTOGRAPHIC ARCHITECTURE
+
+This is the most sensitive part of the project.
+
+Do not invent cryptographic algorithms.
+
+Do not create an undocumented custom encryption protocol.
+
+Study official specifications before implementing anything.
+
+Primary references:
+
+- NIST FIPS 203: ML-KEM.
+- NIST FIPS 204: ML-DSA.
+- Signal PQXDH specification.
+- Signal Double Ratchet specification.
+- Signal ML-KEM Braid specification.
+- Relevant upstream implementation documentation.
+
+3.1 Cryptographic Algorithms
+
+Use the following algorithm families:
+
+Purpose| Algorithm
+Classical key exchange| X25519
+Post-quantum key encapsulation| ML-KEM-1024
+Classical identity signature| Ed25519
+Post-quantum identity signature| ML-DSA-87
+Key derivation| Protocol-specified HKDF
+Message authentication| Protocol-specified HMAC
+Symmetric encryption| Reviewed authenticated encryption construction
+Secure random generation| Operating-system CSPRNG
+Memory cleanup| Rust zeroize ecosystem
+
+Use standardized implementations corresponding to the final NIST standards.
+
+Do not confuse older Kyber implementations with standardized ML-KEM.
+
+Verify:
+
+- Crate maintenance.
+- Known vulnerabilities.
+- Independent audit status.
+- License.
+- Android target compatibility.
+- NIST test-vector compatibility.
+- Constant-time implementation properties.
+
+A crate passing unit tests does not automatically make it production-secure.
+
+If an implementation has not been independently audited, explicitly document that limitation.
+
+3.2 Identity Authentication
+
+Every device must possess two identity components:
+
+1. Classical identity.
+2. Post-quantum identity.
+
+Identity key material must be generated using cryptographically secure randomness.
+
+Contact authentication must verify both identity components.
+
+The application must support fingerprint verification.
+
+If a peer's identity changes unexpectedly:
+
+- Show a prominent security warning.
+- Prevent silent identity replacement.
+- Require explicit re-verification.
+
+Prevent identity downgrade attacks.
+
+Do not trust an onion address as proof of a person's identity.
+
+The application identity and the Tor network identity must remain separate.
+
+3.3 Initial Handshake
+
+Design a properly authenticated hybrid post-quantum handshake.
+
+Research the current PQXDH specification and determine whether its assumptions fit this application's serverless contact-discovery model.
+
+Requirements:
+
+- Classical key agreement.
+- Post-quantum key encapsulation.
+- Authenticated identity.
+- Authenticated prekey bundles.
+- Replay protection.
+- Downgrade protection.
+- Domain separation.
+- Fresh session secrets.
+- Protocol version validation.
+
+A QR-based pairing flow must provide a way to authenticate the initial peer identity.
+
+Do not pretend that a standard server-based prekey architecture automatically works without a server.
+
+Document the serverless prekey distribution mechanism.
+
+If this requires a new protocol construction, isolate it for independent cryptographic review before production use.
+
+3.4 Continuous Post-Quantum Ratcheting
+
+Investigate the current Signal Triple Ratchet architecture.
+
+Study:
+
+- Double Ratchet.
+- Sparse Post-Quantum Ratchet (SPQR).
+- ML-KEM Braid.
+- Forward secrecy.
+- Post-compromise security.
+
+Prefer an existing interoperable and reviewed implementation.
+
+Do not implement a speculative version of Triple Ratchet from a high-level description.
+
+If no suitable reviewed implementation is available:
+
+1. Create protocol interfaces.
+2. Document the missing implementation.
+3. Build test harnesses.
+4. Do not advertise the prototype as production-grade post-quantum messaging.
+5. Do not silently substitute ordinary Double Ratchet and label it PQ-secure.
+
+The application must maintain separate sending and receiving state.
+
+Handle:
+
+- Out-of-order messages.
+- Duplicate messages.
+- Replayed messages.
+- Missing messages.
+- Ratchet advancement.
+- Skipped-message limits.
+- Invalid ciphertext.
+- Invalid authentication tags.
+- Unexpected session state.
+- Peer identity changes.
+
+Never reuse a message key.
+
+Never reuse a nonce where the encryption construction prohibits reuse.
+
+---
+
+SECTION 4: NETWORK ARCHITECTURE
+
+Implement Tor networking using the official Rust Arti ecosystem.
+
+Before implementation, inspect:
+
+- Current stable Arti release.
+- Official onion-service documentation.
+- Current API compatibility.
+- Android support.
+- Onion-service key management.
+- Bridge support.
+- Pluggable transport support.
+- Foreground/background lifecycle behavior.
+- Known security advisories.
+
+Do not blindly copy old Arti examples.
+
+Pin compatible dependency versions and maintain Cargo.lock.
+
+4.1 Onion Services
+
+Each device should operate its own application-controlled Onion Service.
+
+The application must:
+
+1. Initialize the Tor client.
+2. Bootstrap the Tor network.
+3. Initialize the Onion Service.
+4. Obtain its onion address.
+5. Start an incoming connection listener.
+6. Accept authenticated peer sessions.
+7. Close sessions when the user disconnects.
+
+Use an appropriate loopback or Unix-socket connection between the application transport and the local service.
+
+Avoid exposing unnecessary local network ports.
+
+Do not expose the local messaging listener to the public Wi-Fi or mobile network interface.
+
+4.2 Network Restrictions
+
+STRICT RULE:
+
+No direct clearnet fallback.
+
+If Tor is unavailable, messaging must fail closed.
+
+Never send application messages using:
+
+- Direct public IP connections.
+- Normal HTTPS fallback.
+- Unprotected WebSockets.
+- Public relay servers.
+- Cloud messaging services.
+
+Prevent accidental DNS leakage.
+
+Do not introduce third-party analytics or remote telemetry.
+
+Support optional Tor bridges or supported pluggable transports only after verifying their current availability and integration requirements.
+
+Do not promise that ISP surveillance or traffic correlation is impossible.
+
+4.3 Connectivity States
+
+Implement explicit networking states:
+
+- OFFLINE
+- INITIALIZING
+- TOR_BOOTSTRAPPING
+- TOR_READY
+- ONION_SERVICE_STARTING
+- ONION_SERVICE_READY
+- CONNECTING_TO_PEER
+- AUTHENTICATING_PEER
+- E2EE_SESSION_READY
+- DISCONNECTING
+- ERROR
+
+Display the actual state to the user.
+
+Never show Connected merely because a local socket has opened.
+
+A connection is considered ready only after authenticated peer handshake completion.
+
+4.4 Android Background Restrictions
+
+Do not assume Android will keep the application online indefinitely.
+
+Research current Android foreground-service and background execution restrictions.
+
+Use a user-visible persistent notification where legally and technically required.
+
+The notification must never expose message content.
+
+When the Android process is stopped, the app must not claim to remain reachable.
+
+Both peers being online is a requirement of the initial STRICT EPHEMERAL architecture.
+
+---
+
+SECTION 5: ANDROID DEVICE SECURITY
+
+5.1 Android Keystore
+
+Use Android Keystore.
+
+Use StrongBox when the device supports it.
+
+Do not assume all devices support StrongBox or the same cryptographic algorithms.
+
+Use a hardware-backed AES key for wrapping sensitive identity-key material where supported.
+
+Architecture:
+
+Hardware-backed AES Key
+|
+v
+Encrypted Identity Material
+|
+v
+App-private Storage
+|
+v
+Controlled Unlock
+|
+v
+Rust Cryptographic Core
+
+Handle hardware security fallback carefully:
+
+- StrongBox available.
+- TEE-backed Keystore available.
+- Software-backed Keystore only.
+
+Expose the actual security level in diagnostics.
+
+Never claim hardware-backed security when the device uses software-backed storage.
+
+Do not assume ML-KEM or ML-DSA keys can be generated or stored directly inside every StrongBox implementation.
+
+5.2 Volatile Memory
+
+Implement best-effort RAM-only session handling.
+
+Use:
+
+- Rust zeroizing data structures.
+- Minimum secret copies.
+- Short-lived plaintext buffers.
+- Explicit buffer clearing.
+- Session-scoped memory.
+- Sensitive-data-safe FFI.
+- No plaintext debug logging.
+
+Use mlock only when supported and permitted.
+
+Do not claim that mlock prevents all Android swapping, memory snapshots, kernel access, or forensic extraction.
+
+Document the exact memory security limitations.
+
+5.3 Sensitive Android UI
+
+Implement:
+
+- FLAG_SECURE.
+- Protected recent-app preview.
+- Hidden notification previews.
+- Restricted clipboard behavior.
+- No autocomplete for sensitive PIN fields.
+- No chat-content analytics.
+- No plaintext crash reports.
+- No automatic cloud backup.
+
+Restrict application backup through Android backup rules.
+
+Do not request contacts, microphone, location, or storage permissions unless a specific implemented feature requires them.
+
+Camera permission may be requested for QR scanning.
+
+5.4 Session Destruction
+
+Provide a manual emergency Lock/Disconnect operation.
+
+When activated:
+
+1. Stop message processing.
+2. Terminate active peer sessions.
+3. Stop the relevant local listener.
+4. Invalidate session handles.
+5. Clear volatile chat buffers.
+6. Clear in-memory ratchet/session state.
+7. Close sensitive UI screens.
+
+All cleanup must be best effort.
+
+Do not implement automatic USB-triggered wiping.
+
+Do not implement fake decoy-chat behavior or claim guaranteed NAND erasure.
+
+Do not implement anti-debugging evasion designed to conceal the application from security analysis.
+
+Root or device-integrity checks, where useful, must be informational risk indicators rather than guarantees of safety.
+
+---
+
+SECTION 6: QR PAIRING
+
+Build a complete QR-based contact pairing system.
+
+The QR format must be versioned and authenticated.
+
+Suggested logical fields:
+
+- Protocol identifier.
+- Protocol version.
+- Onion address.
+- Classical identity fingerprint.
+- PQ identity fingerprint.
+- Expiry.
+- Random pairing nonce.
+- Supported protocol capabilities.
+
+Use a deterministic, well-specified serialization format.
+
+Do not trust arbitrary QR contents.
+
+Validate field lengths, encoding, expiry and supported versions.
+
+Contact pairing workflow:
+
+1. User A opens Add Contact.
+2. User A generates a temporary pairing QR.
+3. User B scans it.
+4. Both devices perform the specified authenticated pairing procedure.
+5. Both users compare their identity fingerprints.
+6. User explicitly confirms the verified identity.
+7. Contact is saved locally in encrypted form.
+8. The pairing artifact expires.
+
+Never silently overwrite an existing contact identity.
+
+Implement QR generation and scanning as real working features.
+
+---
+
+SECTION 7: APPLICATION UI / UX
+
+Build a premium, minimal, modern privacy-focused Android interface.
+
+The application name:
+
+ZEROTRACE
+
+Visual direction:
+
+- Dark-first interface.
+- Charcoal/near-black surfaces.
+- Subtle green security indicators.
+- Clean typography.
+- Minimal visual noise.
+- Material 3.
+- Smooth but lightweight animations.
+- Accessible contrast.
+- Responsive layouts.
+
+Support Hindi and English localization.
+
+Do not make the interface look like a generic chat application clone.
+
+Required Screens
+
+1. Splash Screen
+
+- ZeroTrace logo.
+- App name.
+- Security initialization indicator.
+
+2. Onboarding
+
+Explain:
+
+- No phone number required.
+- No application-operated central messaging server.
+- Both participants need to be online.
+- Conversations are ephemeral.
+- Tor connectivity may be slow.
+- No security software can guarantee protection against a fully compromised device.
+
+Require acceptance of the security limitations.
+
+3. Identity Creation
+
+- Generate cryptographic identity.
+- Show initialization progress.
+- Store protected identity material.
+- Display identity fingerprint.
+- Generate Onion Service when online.
+
+4. Home Screen
+
+Display:
+
+- Current Tor status.
+- User identity.
+- My QR Code.
+- Add Contact.
+- Verified contacts.
+- Recent active sessions.
+- Secure Lock button.
+
+5. My Identity Screen
+
+Show:
+
+- Onion address.
+- Classical fingerprint.
+- Post-quantum fingerprint.
+- Device security capability.
+- Copy address.
+- Share pairing QR.
+
+Do not expose private keys.
+
+6. Add Contact Screen
+
+Options:
+
+- Scan QR.
+- Display my QR.
+- Verify fingerprint.
+- Cancel pairing.
+
+7. Contact Verification Screen
+
+Show both fingerprints in a readable comparison format.
+
+Require explicit confirmation.
+
+8. Chat Screen
+
+Features:
+
+- Text message input.
+- Message sending.
+- Message receiving.
+- Sending status.
+- Delivery status.
+- Session status.
+- Peer verification indicator.
+- Tor connectivity indicator.
+- Disconnect button.
+
+No persistent message history.
+
+When the user leaves and destroys the conversation session, the chat must disappear.
+
+9. Security Dashboard
+
+Show real implementation status:
+
+- Identity status.
+- Hardware-backed key status.
+- Tor status.
+- Onion Service status.
+- E2EE status.
+- PQ handshake status.
+- Ratchet status.
+- Session memory status.
+
+Never display a green success indicator for an unimplemented feature.
+
+10. Settings
+
+- Language.
+- Session timeout.
+- Auto-lock.
+- Security information.
+- Network configuration.
+- Disconnect all sessions.
+- Delete local identity.
+- About.
+- Open-source licenses.
+
+---
+
+SECTION 8: PROJECT STRUCTURE
+
+Use modular architecture.
+
+Suggested layout:
+
+ZeroTraceMessenger/
+|
+|-- app/
+|   |-- src/main/
+|       |-- java/com/zerotrace/
+|           |-- ui/
+|           |   |-- onboarding/
+|           |   |-- identity/
+|           |   |-- pairing/
+|           |   |-- chat/
+|           |   |-- contacts/
+|           |   |-- dashboard/
+|           |   |-- settings/
+|           |
+|           |-- security/
+|           |   |-- KeystoreManager.kt
+|           |   |-- StrongBoxManager.kt
+|           |   |-- SecureWindowManager.kt
+|           |   |-- BackupPolicy.kt
+|           |
+|           |-- network/
+|           |   |-- SessionService.kt
+|           |
+|           |-- bridge/
+|               |-- RustCoreBridge.kt
+|
+|-- rust-core/
+|   |-- Cargo.toml
+|   |-- src/
+|       |-- identity/
+|       |-- handshake/
+|       |-- crypto/
+|       |   |-- kem/
+|       |   |-- signatures/
+|       |   |-- kdf/
+|       |   |-- ratchet/
+|       |
+|       |-- network/
+|       |   |-- arti/
+|       |   |-- onion/
+|       |   |-- peer/
+|       |
+|       |-- session/
+|       |-- memory/
+|       |-- storage/
+|       |-- ffi/
+|       |-- lib.rs
+|
+|-- docs/
+|   |-- ARCHITECTURE.md
+|   |-- THREAT_MODEL.md
+|   |-- CRYPTOGRAPHIC_PROTOCOL.md
+|   |-- SECURITY.md
+|   |-- PRIVACY.md
+|   |-- DEPENDENCIES.md
+|   |-- LIMITATIONS.md
+|
+|-- tests/
+|   |-- crypto/
+|   |-- handshake/
+|   |-- ratchet/
+|   |-- network/
+|   |-- memory/
+|   |-- android/
+|
+|-- README.md
+
+You may improve this structure when technically justified.
+
+Keep UI and cryptographic implementation separate.
+
+---
+
+SECTION 9: SECURITY TESTING
+
+Security testing is mandatory.
+
+Do not consider successful compilation sufficient.
+
+Cryptographic Tests
+
+Test:
+
+- NIST ML-KEM vectors.
+- NIST ML-DSA vectors.
+- Key generation.
+- Encapsulation.
+- Decapsulation.
+- Signature generation.
+- Signature verification.
+- Modified ciphertexts.
+- Invalid public keys.
+- Invalid signatures.
+- Key derivation.
+- Authentication failures.
+
+Protocol Tests
+
+Test:
+
+- MITM attempts.
+- Invalid identity signatures.
+- Downgrade attempts.
+- Replay attacks.
+- Duplicate messages.
+- Reordered messages.
+- Missing messages.
+- Ratchet synchronization.
+- Invalid counters.
+- Invalid framing.
+- Malformed payloads.
+- Peer identity replacement.
+
+Network Tests
+
+Test:
+
+- Tor bootstrap failure.
+- Onion Service startup.
+- Peer connection.
+- Peer disconnection.
+- Network switching.
+- Wi-Fi loss.
+- Mobile data loss.
+- Android process death.
+- Reconnection.
+- Invalid peer.
+- Direct network fallback prevention.
+
+Verify that no application message leaves through the normal clearnet network when Tor fails.
+
+Android Tests
+
+Test:
+
+- App locking.
+- App backgrounding.
+- Process termination.
+- Device reboot.
+- Screen lock.
+- Session timeout.
+- Backup exclusions.
+- Screenshot protection.
+- Notification privacy.
+- Keystore invalidation.
+- StrongBox unavailable.
+- Low-memory conditions.
+
+Fuzz Testing
+
+Fuzz:
+
+- QR parser.
+- Pairing parser.
+- Network framing.
+- Serialized messages.
+- Ratchet message processing.
+- Untrusted peer payloads.
+
+Use maintained fuzzing tools.
+
+Document results.
+
+---
+
+SECTION 10: IMPLEMENTATION PHASES
+
+Develop progressively.
+
+Do not try to generate the entire application in one unverified code dump.
+
+PHASE 0 — RESEARCH AND PROJECT AUDIT
+
+Before writing security-critical code:
+
+1. Inspect the workspace.
+2. Inspect available Android SDK and NDK.
+3. Inspect Rust toolchain.
+4. Verify dependency maintenance.
+5. Read official protocol specifications.
+6. Check Android compatibility.
+7. Check Arti APIs and onion-service support.
+8. Create THREAT_MODEL.md.
+9. Create ARCHITECTURE.md.
+10. Create a dependency and risk matrix.
+
+Deliver a technical feasibility report.
+
+Then proceed to implementation.
+
+PHASE 1 — ANDROID APPLICATION FOUNDATION
+
+Build:
+
+- Gradle project.
+- Kotlin Compose UI.
+- Navigation.
+- Theme.
+- Onboarding.
+- Home screen.
+- Settings.
+- Security dashboard.
+
+Compile and run.
+
+PHASE 2 — RUST SECURITY CORE
+
+Build:
+
+- Rust library.
+- UniFFI bridge.
+- Secure buffers.
+- Identity interfaces.
+- Randomness.
+- Key derivation interfaces.
+- Cryptographic test framework.
+
+Do not use fake cryptographic functions.
+
+PHASE 3 — IDENTITY AND PAIRING
+
+Implement:
+
+- Device identity generation.
+- Hardware-backed wrapping.
+- QR generation.
+- QR scanning.
+- Fingerprint display.
+- Contact verification.
+- Encrypted local contact storage.
+
+Test pairing between two devices.
+
+PHASE 4 — POST-QUANTUM SESSION
+
+Implement only according to verified protocol specifications.
+
+Build:
+
+- Hybrid initial handshake.
+- Identity authentication.
+- Prekey validation.
+- Ratchet state.
+- Message encryption.
+- Message decryption.
+- Replay protection.
+
+If a production-quality protocol implementation cannot be verified, mark this phase as incomplete rather than substituting an unreviewed custom protocol.
+
+PHASE 5 — TOR NETWORK
+
+Integrate Arti.
+
+Build:
+
+- Tor manager.
+- Onion Service manager.
+- Network state machine.
+- Peer transport.
+- Incoming connection handling.
+- Connection lifecycle.
+- Fail-closed network behavior.
+
+Test with two Android devices.
+
+PHASE 6 — REAL CHAT
+
+Connect the UI to the actual Rust cryptographic and networking layers.
+
+Implement real bidirectional messaging.
+
+Messages must travel through Tor and use the actual E2EE implementation.
+
+Do not use local fake messaging or simulated encryption in production builds.
+
+PHASE 7 — ANDROID HARDENING
+
+Implement:
+
+- Keystore integration.
+- FLAG_SECURE.
+- Backup exclusion.
+- Session lifecycle.
+- Memory cleanup.
+- Notification privacy.
+- Error handling.
+- Permission minimization.
+
+PHASE 8 — RELEASE READINESS
+
+Complete:
+
+- Full build.
+- Unit tests.
+- Integration tests.
+- Fuzz tests.
+- Dependency audit.
+- License inventory.
+- Security documentation.
+- Device testing.
+- Known-limitations report.
+
+Do not claim a production security audit has been completed unless an actual independent audit has taken place.
+
+---
+
+SECTION 11: DEVELOPMENT RULES
+
+These rules are mandatory.
+
+1. Build actual files, not just explanations.
+2. Do not generate fake APIs.
+3. Do not invent Rust crate names.
+4. Verify every important dependency.
+5. Pin compatible dependency versions.
+6. Maintain Cargo.lock.
+7. Use maintained Android libraries.
+8. Do not use deprecated cryptographic algorithms.
+9. Do not write custom cryptography merely to avoid dependency work.
+10. Do not log plaintext messages.
+11. Do not expose private keys to Compose UI.
+12. Do not create hidden network fallbacks.
+13. Do not add analytics.
+14. Do not add Firebase.
+15. Do not add a centralized message database.
+16. Do not silently replace real security implementations with mock implementations.
+17. Keep experimental functionality clearly separated from production functionality.
+18. Handle every error explicitly.
+19. Document every security limitation.
+20. Compile and test after every meaningful development phase.
+
+When a dependency is unavailable or an API has changed, investigate the official documentation and select a valid alternative.
+
+Do not guess.
+
+If something cannot be completed, state precisely what is missing and why.
+
+Never mark a component COMPLETE merely because its interface or UI exists.
+
+---
+
+SECTION 12: FINAL DELIVERABLES
+
+Deliver the following:
+
+1. Complete Android Studio project.
+2. Complete Rust source code.
+3. Kotlin-to-Rust integration.
+4. Gradle configuration.
+5. Cargo configuration.
+6. Android manifest.
+7. App icons and branding.
+8. Working QR pairing.
+9. Working identity management.
+10. Actual Tor networking integration.
+11. Actual cryptographic session implementation, where verified.
+12. RAM-only chat session implementation.
+13. Security dashboard.
+14. Unit tests.
+15. Integration tests.
+16. Fuzz testing setup.
+17. README.md.
+18. THREAT_MODEL.md.
+19. SECURITY.md.
+20. CRYPTOGRAPHIC_PROTOCOL.md.
+21. LIMITATIONS.md.
+22. DEPENDENCIES.md.
+23. Build instructions.
+24. Test report.
+25. Debug APK when the environment supports Android builds.
+
+The README must explain exactly how to build and install the application.
+
+Include commands for Gradle and Cargo builds.
+
+Document how to connect two physical Android devices for end-to-end testing.
+
+---
+
+SECTION 13: DEFINITION OF DONE
+
+The project is not complete until the following conditions are met.
+
+[ ] Android project compiles.
+
+[ ] Rust library compiles for the intended Android targets.
+
+[ ] Kotlin-Rust bridge works.
+
+[ ] Device identity generation works.
+
+[ ] QR pairing works.
+
+[ ] Fingerprint verification works.
+
+[ ] Protected identity storage works.
+
+[ ] Tor bootstrapping works.
+
+[ ] Onion Service startup works.
+
+[ ] Peer connection works.
+
+[ ] Peer authentication works.
+
+[ ] Real encrypted messages can be sent.
+
+[ ] Real encrypted messages can be received.
+
+[ ] Replay protection works.
+
+[ ] Message history does not persist.
+
+[ ] Session disconnect clears volatile session data on a best-effort basis.
+
+[ ] Direct clearnet fallback is impossible.
+
+[ ] Sensitive logs are absent.
+
+[ ] Android backup exclusions work.
+
+[ ] Security tests run successfully.
+
+[ ] Documentation accurately describes implementation status.
+
+A checked box must be backed by actual implementation or test evidence.
+
+If a feature remains experimental, it must remain visibly marked experimental.
+
+---
+
+FINAL EXECUTION INSTRUCTION
+
+Begin by inspecting the actual development environment.
+
+Do not stop after producing an architecture document.
+
+Create the real project, implement the application phase by phase, run builds and tests, inspect failures, correct them, and maintain the documentation.
+
+Prioritize a working, verifiable security architecture over the number of features.
+
+If the environment supports file creation, terminal access, Gradle and Cargo, use those capabilities.
+
+If the environment cannot run Android builds, generate the complete source project and provide exact unexecuted build commands. Never claim that an untested build succeeded.
+
+Maintain a DEVELOPMENT_STATUS.md containing:
+
+- Completed phases.
+- Incomplete phases.
+- Build status.
+- Test status.
+- Known bugs.
+- Security limitations.
+- Next implementation tasks.
+
+The final objective is a genuinely implementable Android messenger, not a fictional application with attractive screens and unsupported security claims.
+
+START WITH PHASE 0 AND CONTINUE WITH IMPLEMENTATION.

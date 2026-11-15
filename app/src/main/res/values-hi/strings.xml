@@ -1,0 +1,20 @@
+<resources>
+    <string name="app_name">ZeroTrace</string>
+    <string name="tagline">निजी संवाद। कोई केंद्रीय सर्वर नहीं। कोई स्थायी चैट इतिहास नहीं।</string>
+    <string name="splash_initializing">हार्डवेयर कीस्टोर और क्रिप्टोग्राफ़िक कोर प्रारंभ हो रहा है…</string>
+    <string name="onboarding_title">सख्त अल्पकालिक (Ephemeral) आर्किटेक्चर</string>
+    <string name="onboarding_rule_1">फ़ोन नंबर, ईमेल या केंद्रीय खाते की आवश्यकता नहीं है।</string>
+    <string name="onboarding_rule_2">कोई कंपनी-संचालित केंद्रीय मैसेजिंग सर्वर या क्लाउड डेटाबेस नहीं।</string>
+    <string name="onboarding_rule_3">Tor अनियन सर्विस पर दोनों उपयोगकर्ताओं का एक साथ ऑनलाइन होना आवश्यक है।</string>
+    <string name="onboarding_rule_4">संदेश केवल अस्थायी RAM में रहते हैं और डिस्कनेक्ट होने पर मिट जाते हैं।</string>
+    <string name="onboarding_rule_5">Tor कनेक्टिविटी धीमी हो सकती है और नेटवर्क सर्किट पर निर्भर करती है।</string>
+    <string name="onboarding_rule_6">पूरी तरह से हैक किए गए डिवाइस या कर्नेल के विरुद्ध कोई भी सॉफ़्टवेयर पूर्ण सुरक्षा की गारंटी नहीं दे सकता।</string>
+    <string name="onboarding_accept_checkbox">मैं इन सुरक्षा और तकनीकी सीमाओं को समझता/समझती हूँ और स्वीकार करता/करती हूँ।</string>
+    <string name="onboarding_continue">पहचान निर्माण पर आगे बढ़ें</string>
+    <string name="identity_creation_title">दोहरी पोस्ट-क्वांटम पहचान</string>
+    <string name="identity_generate_btn">सुरक्षित डिवाइस पहचान बनाएं</string>
+    <string name="emergency_lock">आपातकालीन लॉक / सत्र मिटाएं</string>
+    <string name="notification_channel_name">ZeroTrace अस्थायी सर्किट</string>
+    <string name="notification_active_title">ZeroTrace अस्थायी सत्र सक्रिय</string>
+    <string name="notification_active_body">सत्र देखने या तुरंत समाप्त करने के लिए टैप करें।</string>
+</resources>

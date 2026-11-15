@@ -1,0 +1,117 @@
+name: ZeroTrace Android & Rust Core CI Build
+
+on:
+  push:
+    branches: [ "main", "master", "**" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+env:
+  STORE_PASSWORD: ${{ secrets.STORE_PASSWORD || 'zerotrace_release_pass' }}
+  KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'zerotrace_release_pass' }}
+
+jobs:
+  build-zerotrace-apk:
+    name: Build Rust Core + Android Debug & Release APKs
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK Licenses & Install SDK 36 / NDK
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager "platform-tools" "build-tools;36.0.0" "platforms;android-36" "ndk;27.2.12479018" || true
+          sdkmanager "platforms;android-36.1" || true
+
+      - name: Set up Rust Toolchain & Android Targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - name: Cache Cargo Registry & Target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust-core/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust-core/Cargo.lock') }}
+
+      - name: Run Rust Security Core Unit Tests & Build JNI Shared Libraries
+        run: |
+          cargo test --manifest-path rust-core/Cargo.toml
+          cargo install cargo-ndk --locked || true
+          if command -v cargo-ndk >/dev/null 2>&1; then
+            export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/27.2.12479018"
+            cargo ndk -t arm64-v8a -t x86_64 -o app/src/main/jniLibs build --release --manifest-path rust-core/Cargo.toml || true
+          fi
+
+      - name: Prepare Debug & Release Keystores for Gradle Signing
+        run: |
+          if [ -f "debug.keystore.base64" ] && [ ! -f "debug.keystore" ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          fi
+          if [ ! -f "debug.keystore" ]; then
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          if [ ! -f "my-upload-key.jks" ]; then
+            keytool -genkeypair -v \
+              -keystore my-upload-key.jks \
+              -storepass "${STORE_PASSWORD}" \
+              -alias upload \
+              -keypass "${KEY_PASSWORD}" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=ZeroTrace Messenger,OU=Security,O=ZeroTrace,L=ZeroServer,S=State,C=US"
+          fi
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Run Unit & Robolectric Tests
+        run: |
+          export KEYSTORE_PATH="${GITHUB_WORKSPACE}/my-upload-key.jks"
+          gradle :app:testDebugUnitTest --stacktrace
+
+      - name: Build Debug & Release APKs
+        run: |
+          export KEYSTORE_PATH="${GITHUB_WORKSPACE}/my-upload-key.jks"
+          gradle :app:assembleDebug :app:assembleRelease --stacktrace
+
+      - name: Upload Debug APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZeroTrace-Messenger-Debug-APK
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
+
+      - name: Upload Release APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZeroTrace-Messenger-Release-APK
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn

@@ -1,0 +1,10 @@
+{
+  "name": "ZeroTrace",
+  "description": "Private Communication. No Central Server. No Persistent Conversations. Post-quantum hybrid E2EE messenger over Tor Onion Services.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
