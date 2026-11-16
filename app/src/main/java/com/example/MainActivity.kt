@@ -76,6 +76,7 @@ import com.zerotrace.ui.onboarding.ZeroTraceOnboardingScreen
 import com.zerotrace.ui.onboarding.ZeroTraceSplashScreen
 import com.zerotrace.ui.pairing.AddContactScreen
 import com.zerotrace.ui.pairing.ContactVerificationScreen
+import com.zerotrace.ui.settings.StorageAndDataScreen
 import com.zerotrace.ui.settings.ZeroTracePrivacyCenterScreen
 import com.zerotrace.ui.settings.ZeroTraceSettingsScreen
 import com.zerotrace.ui.theme.CrimsonDanger
@@ -325,6 +326,17 @@ fun ZeroTraceRootApp(
         }?.avatarBytes
     }
 
+    BackHandler(
+        enabled = uiState.currentScreen !in setOf(
+            ZeroTraceScreen.SPLASH,
+            ZeroTraceScreen.ONBOARDING,
+            ZeroTraceScreen.IDENTITY_CREATION,
+            ZeroTraceScreen.HOME
+        )
+    ) {
+        viewModel.navigateBack()
+    }
+
     when (uiState.currentScreen) {
         ZeroTraceScreen.SPLASH -> {
             ZeroTraceSplashScreen(language = uiState.language)
@@ -494,6 +506,9 @@ fun ZeroTraceRootApp(
                                 volatileMessagesInRamCount = totalRichMsgsInRam,
                                 volatileStatusesInRamCount = uiState.ephemeralStatuses.size,
                                 volatileCallsInRamCount = uiState.callHistory.size,
+                                totalRamBytes = uiState.totalRamBytes,
+                                totalRomBytes = uiState.totalRomBytes,
+                                keepDataChatsCount = uiState.keepDataOnions.size,
                                 statusBanner = uiState.statusBannerMessage,
                                 errorBanner = effectiveErrorBanner,
                                 onDismissBanner = viewModel::dismissBanners,
@@ -629,6 +644,12 @@ fun ZeroTraceRootApp(
         ZeroTraceScreen.CONTACT_PROFILE -> {
             val profileContact = uiState.inspectedProfileContact ?: uiState.activePeerContact
             if (profileContact != null) {
+                val isKeep = uiState.keepDataOnions.any {
+                    it.equals(profileContact.onionAddress, ignoreCase = true)
+                }
+                val breakdown = uiState.chatStorageBreakdowns.firstOrNull {
+                    it.onionAddress.equals(profileContact.onionAddress, ignoreCase = true)
+                }
                 ContactProfileScreen(
                     contact = profileContact,
                     connectivityState = connectivityState,
@@ -636,6 +657,20 @@ fun ZeroTraceRootApp(
                     sharedMessagesInRam = uiState.richMessagesByOnion[profileContact.onionAddress].orEmpty(),
                     disappearingTimerSec = uiState.disappearingMessageTimerSec,
                     isBlocked = profileContact.onionAddress in uiState.blockedOnions,
+                    isKeepDataEnabled = isKeep,
+                    storageBreakdown = breakdown,
+                    statusBanner = uiState.statusBannerMessage,
+                    onDismissBanner = viewModel::dismissBanners,
+                    onToggleKeepData = { enabled ->
+                        viewModel.toggleKeepDataForChat(profileContact.onionAddress, enabled)
+                    },
+                    onMoveRamToRom = { viewModel.moveChatRamToRom(profileContact.onionAddress) },
+                    onMoveRomToRam = { viewModel.moveChatRomToRam(profileContact.onionAddress) },
+                    onOpenStorageManager = { viewModel.navigateTo(ZeroTraceScreen.STORAGE_AND_DATA) },
+                    onOpenMedia = { mediaMsg ->
+                        viewModel.openMediaPreview(mediaMsg, returnScreen = ZeroTraceScreen.CONTACT_PROFILE)
+                    },
+                    onSaveMedia = { mediaMsg -> viewModel.saveMessageMediaToGallery(mediaMsg) },
                     onBack = { viewModel.navigateBack() },
                     onStartChat = { viewModel.startAuthenticatedSessionWithContact(profileContact) },
                     onStartVoiceCall = { viewModel.startEncryptedCall(profileContact, CallMediaKind.AUDIO) },
@@ -746,6 +781,43 @@ fun ZeroTraceRootApp(
                 onToggleReadReceipts = viewModel::setReadReceiptsEnabled,
                 onToggleTypingIndicators = viewModel::setTypingIndicatorsEnabled,
                 onToggleMetadataMinimized = viewModel::setMetadataMinimizedMode,
+                onBack = { viewModel.navigateBack() }
+            )
+        }
+
+        ZeroTraceScreen.STORAGE_AND_DATA -> {
+            val totalRamMsgs = uiState.richMessagesByOnion.values.sumOf { it.size }
+            val totalRamMedia = uiState.richMessagesByOnion.values.flatten().count {
+                it.fileTransfer?.decryptedInMemoryBytes != null
+            }
+            val contactsMap = uiState.verifiedContacts.associateBy { it.onionAddress.lowercase() }
+            StorageAndDataScreen(
+                language = uiState.language,
+                totalRamBytes = uiState.totalRamBytes,
+                totalRamMessages = totalRamMsgs,
+                totalRamMediaCount = totalRamMedia,
+                totalRamStatusesCount = uiState.ephemeralStatuses.size,
+                totalRamCallsCount = uiState.callHistory.size,
+                totalRomBytes = uiState.totalRomBytes,
+                totalRomMessages = uiState.totalRomMessages,
+                totalRomMediaCount = uiState.totalRomMediaCount,
+                keepDataChatsCount = uiState.keepDataOnions.size,
+                contactsByOnion = contactsMap,
+                chatBreakdowns = uiState.chatStorageBreakdowns,
+                statusBanner = uiState.statusBannerMessage,
+                errorBanner = effectiveErrorBanner,
+                onDismissBanner = viewModel::dismissBanners,
+                onToggleKeepDataForChat = viewModel::toggleKeepDataForChat,
+                onMoveChatRamToRom = viewModel::moveChatRamToRom,
+                onMoveChatRomToRam = viewModel::moveChatRomToRam,
+                onDeleteChatRamOnly = viewModel::deleteChatRamOnly,
+                onDeleteChatRomOnly = viewModel::deleteChatRomOnly,
+                onDeleteChatBoth = viewModel::deleteChatBoth,
+                onMoveAllRamToRom = viewModel::moveAllRamToRom,
+                onMoveAllRomToRam = viewModel::moveAllRomToRam,
+                onWipeAllRam = viewModel::wipeVolatileRamOnly,
+                onWipeAllRom = viewModel::wipeAllRomVaultsOnly,
+                onWipeEverything = viewModel::wipeBothRamAndRom,
                 onBack = { viewModel.navigateBack() }
             )
         }

@@ -159,4 +159,99 @@ class ExampleRobolectricTest {
             tempFile.delete()
         }
     }
+
+    @Test
+    fun testChatRomVaultDoubleCipherCascadeAndFineChunking() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val keystoreManager = KeystoreManager(context)
+        val romVault = com.zerotrace.security.ChatRomVault(context, keystoreManager)
+        val peerOnion = "gsvas7k5tmpcrs4p6llfveyojgdta5vivip4wcpenvoboldqhpzh35qd.onion"
+
+        // 1. Verify 100 KB video uses fine 2 KiB chunks -> 50 chunks (~2% smooth steps)
+        val videoBytes = ByteArray(100 * 1024) { idx -> (idx * 31).toByte() }
+        val encSteps = mutableListOf<Int>()
+        val bundle = com.zerotrace.bridge.EncryptedFileTransferEngine.encryptAndChunkPayload(
+            rawFileName = "clip_100kb.mp4",
+            mimeType = "video/mp4",
+            payloadBytes = videoBytes,
+            stripImageMetadata = false,
+            onChunkEncryptProgress = { done, _ -> encSteps.add(done) }
+        )
+        assertEquals(50, bundle.manifest.totalChunks)
+        assertEquals(50, encSteps.size)
+        val decryptedVideo = com.zerotrace.bridge.EncryptedFileTransferEngine.decryptAndVerifyChunks(
+            manifest = bundle.manifest,
+            fileSecretKey32 = bundle.fileSecretKey32,
+            chunks = bundle.chunks
+        )
+        assertArrayEquals(videoBytes, decryptedVideo)
+
+        // 2. Verify Double-Cipher Cascade ROM Vault encryption, tamper detection & archive round-trip
+        val sealed = romVault.sealCascadeEnvelope(videoBytes, peerOnion, "TEST-MEDIA")
+        val opened = romVault.openCascadeEnvelope(sealed, peerOnion, "TEST-MEDIA")
+        assertArrayEquals(videoBytes, opened)
+
+        // Flip 1 byte in outer ciphertext -> must fail authentication
+        val tampered = sealed.copyOf()
+        tampered[tampered.lastIndex] = (tampered.last().toInt() xor 0xFF).toByte()
+        try {
+            romVault.openCascadeEnvelope(tampered, peerOnion, "TEST-MEDIA")
+            fail("Expected tampered double-cipher ROM envelope to fail authentication")
+        } catch (_: Exception) {
+            // Expected AEAD failure
+        }
+
+        // Wrong onion AAD -> must fail
+        try {
+            romVault.openCascadeEnvelope(sealed, "otherpeer.onion", "TEST-MEDIA")
+            fail("Expected wrong peer onion AAD to fail")
+        } catch (_: Exception) {
+            // Expected AAD failure
+        }
+
+        val mediaMsg = com.zerotrace.bridge.RichConversationMessage(
+            id = "msg-vid-1",
+            senderLabel = "You",
+            bodyText = "100 KB encrypted video",
+            timestampEpochMillis = 1_700_000_000_000L,
+            isOutgoing = true,
+            ratchetStepIndex = 1,
+            pqEpoch = 1,
+            pqBraidAdvanced = false,
+            payloadKind = com.zerotrace.bridge.MessagePayloadKind.VIDEO,
+            fileTransfer = com.zerotrace.bridge.EncryptedTransferProgress(
+                manifest = bundle.manifest,
+                direction = com.zerotrace.bridge.TransferDirection.OUTGOING,
+                state = com.zerotrace.bridge.TransferLifecycleState.VERIFIED_READY_IN_RAM,
+                chunksProcessed = bundle.manifest.totalChunks,
+                bytesTransferred = videoBytes.size.toLong(),
+                decryptedInMemoryBytes = decryptedVideo,
+                isStoredInRom = true
+            )
+        )
+        romVault.saveChatArchive(peerOnion, listOf(mediaMsg), "🎥 clip_100kb.mp4", 1_700_000_000_000L)
+        val stats = romVault.inspectChatRomStats(peerOnion)
+        assertEquals(1, stats.messageCount)
+        assertEquals(1, stats.mediaBlobCount)
+        assertTrue(stats.totalEncryptedBytes > 100 * 1024)
+
+        val loadedArchive = romVault.loadChatArchive(peerOnion, hydrateSmallMediaIntoRam = false)
+        assertNotNull(loadedArchive)
+        assertEquals(1, loadedArchive!!.messages.size)
+        assertNull(loadedArchive.messages[0].fileTransfer?.decryptedInMemoryBytes)
+        assertTrue(loadedArchive.messages[0].fileTransfer?.isStoredInRom == true)
+        val onDemandBlob = romVault.loadMediaBlob(peerOnion, bundle.manifest.transferId)
+        assertArrayEquals(videoBytes, onDemandBlob)
+
+        // keepDataOnions persists in prefs snapshot
+        val prefs = com.zerotrace.security.PersistedPrefsSnapshot(keepDataOnions = setOf(peerOnion))
+        val decodedPrefs = com.zerotrace.security.EncryptedVaultCodec.decodePrefsAndProfile(
+            com.zerotrace.security.EncryptedVaultCodec.encodePrefsAndProfile(prefs)
+        )
+        assertEquals(setOf(peerOnion), decodedPrefs?.keepDataOnions)
+
+        romVault.wipeAllChatRomVaults()
+        assertEquals(0, romVault.inspectChatRomStats(peerOnion).mediaBlobCount)
+        bundle.wipeZeroize()
+    }
 }

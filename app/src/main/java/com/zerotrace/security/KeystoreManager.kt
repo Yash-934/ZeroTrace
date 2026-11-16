@@ -226,6 +226,12 @@ class KeystoreManager(private val context: Context) {
     }
 
     @Synchronized
+    fun getGlobalChatVaultDiskBytes(): Long {
+        val file = File(context.noBackupFilesDir, CHAT_VAULT_FILE_NAME)
+        return if (file.exists()) file.length() else 0L
+    }
+
+    @Synchronized
     fun wipeWrappedChatVault() {
         val file = File(context.noBackupFilesDir, CHAT_VAULT_FILE_NAME)
         if (file.exists()) {

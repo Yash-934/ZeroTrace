@@ -1101,11 +1101,7 @@ fun MessageBubble(
                                                             modifier = Modifier.size(50.dp)
                                                         )
                                                         Text(
-                                                            text = if (transfer?.state == TransferLifecycleState.ENCRYPTING_AND_CHUNKING) {
-                                                                "ENC"
-                                                            } else {
-                                                                "$uploadPercent%"
-                                                            },
+                                                            text = "${uploadPercent.coerceAtLeast(1)}%",
                                                             style = MaterialTheme.typography.labelSmall.copy(
                                                                 fontSize = 11.sp,
                                                                 fontWeight = FontWeight.Bold
@@ -1117,7 +1113,9 @@ fun MessageBubble(
                                             }
                                         }
                                         Spacer(modifier = Modifier.height(8.dp))
-                                    } else if (message.payloadKind == MessagePayloadKind.VIDEO && decryptedBytes != null) {
+                                    } else if (message.payloadKind == MessagePayloadKind.VIDEO &&
+                                        (decryptedBytes != null || isUploading || transfer?.isStoredInRom == true)
+                                    ) {
                                         Box(
                                             modifier = Modifier
                                                 .fillMaxWidth()
@@ -1136,14 +1134,14 @@ fun MessageBubble(
                                                     contentAlignment = Alignment.Center
                                                 ) {
                                                     CircularProgressIndicator(
-                                                        progress = { uploadProgress.coerceAtLeast(0.06f) },
+                                                        progress = { uploadProgress.coerceAtLeast(0.02f) },
                                                         color = Color.White,
                                                         trackColor = Color.White.copy(alpha = 0.25f),
                                                         strokeWidth = 3.dp,
                                                         modifier = Modifier.size(50.dp)
                                                     )
                                                     Text(
-                                                        text = "$uploadPercent%",
+                                                        text = "${uploadPercent.coerceAtLeast(1)}%",
                                                         style = MaterialTheme.typography.labelSmall.copy(
                                                             fontSize = 11.sp,
                                                             fontWeight = FontWeight.Bold
@@ -1291,17 +1289,18 @@ fun MessageBubble(
                                             TransferLifecycleState.ENCRYPTING_AND_CHUNKING,
                                             TransferLifecycleState.TRANSMITTING_OVER_TOR,
                                             TransferLifecycleState.VERIFYING_INTEGRITY -> {
+                                                val pct = uploadPercent.coerceAtLeast(1)
                                                 val stateLabel = when (transfer.state) {
                                                     TransferLifecycleState.ENCRYPTING_AND_CHUNKING ->
-                                                        "Encrypting $uploadPercent% (${transfer.chunksProcessed}/${transfer.manifest.totalChunks})"
+                                                        "Encrypting $pct% (${transfer.chunksProcessed}/${transfer.manifest.totalChunks})"
                                                     TransferLifecycleState.TRANSMITTING_OVER_TOR ->
-                                                        "Uploading $uploadPercent% (${transfer.chunksProcessed}/${transfer.manifest.totalChunks})"
+                                                        "Sending $pct% (${transfer.chunksProcessed}/${transfer.manifest.totalChunks})"
                                                     TransferLifecycleState.VERIFYING_INTEGRITY ->
-                                                        "Verifying integrity…"
+                                                        "Confirming peer receipt $pct%…"
                                                     else -> transfer.state.name
                                                 }
                                                 LinearProgressIndicator(
-                                                    progress = { uploadProgress.coerceAtLeast(0.05f) },
+                                                    progress = { uploadProgress.coerceAtLeast(0.01f) },
                                                     modifier = Modifier
                                                         .fillMaxWidth()
                                                         .height(6.dp)
@@ -1333,11 +1332,19 @@ fun MessageBubble(
 
                                             TransferLifecycleState.VERIFIED_READY_IN_RAM -> {
                                                 Text(
-                                                    text = "✓ ChaCha20-Poly1305 Verified",
+                                                    text = if (transfer.isStoredInRom && decryptedBytes == null) {
+                                                        "✓ ChaCha20-Poly1305 • Encrypted ROM Vault"
+                                                    } else if (transfer.isStoredInRom) {
+                                                        "✓ Verified • Saved in Encrypted ROM"
+                                                    } else {
+                                                        "✓ ChaCha20-Poly1305 Verified"
+                                                    },
                                                     style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp),
                                                     color = emeraldTint
                                                 )
-                                                if (decryptedBytes != null && (onMediaPreviewClick != null || onSaveMediaClick != null)) {
+                                                if ((decryptedBytes != null || transfer.isStoredInRom) &&
+                                                    (onMediaPreviewClick != null || onSaveMediaClick != null)
+                                                ) {
                                                     Spacer(modifier = Modifier.height(6.dp))
                                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                                         if (onMediaPreviewClick != null) {

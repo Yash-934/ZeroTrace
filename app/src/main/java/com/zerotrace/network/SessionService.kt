@@ -379,6 +379,7 @@ object TorOnionTransportManager {
     private const val FRAME_MEDIA_CHUNK: Byte = 0x06
     private const val FRAME_READ_RECEIPT: Byte = 0x07
     private const val FRAME_KEEPALIVE: Byte = 0x08
+    private const val FRAME_MEDIA_CHUNK_ACK: Byte = 0x09
     private const val FRAME_PEER_HELLO: Byte = 0x10
     private const val FRAME_CALL_INVITE: Byte = 0x20
     private const val FRAME_CALL_ACCEPT: Byte = 0x21
@@ -466,6 +467,7 @@ object TorOnionTransportManager {
     private val discoveredPeerAddresses = ConcurrentHashMap<String, InetSocketAddress>()
     private val connectingEndpoints = ConcurrentHashMap.newKeySet<String>()
     private val incomingMediaChunksByTransferId = ConcurrentHashMap<String, ConcurrentHashMap<Int, EncryptedFileChunk>>()
+    private val mediaChunkAckWaiters = ConcurrentHashMap<String, ConcurrentHashMap<Int, CompletableDeferred<Unit>>>()
 
     private val networkCallbackRegistered = AtomicBoolean(false)
     private val lastActiveNetworkHandle = AtomicLong(-1L)
@@ -1298,6 +1300,16 @@ object TorOnionTransportManager {
             }
         }
 
+        fun sendMediaChunkAck(transferId: String, chunkIndex: Int) {
+            synchronized(writeLock) {
+                out.writeInt(WIRE_MAGIC)
+                out.writeByte(FRAME_MEDIA_CHUNK_ACK.toInt())
+                out.writeUTF(transferId)
+                out.writeInt(chunkIndex)
+                out.flush()
+            }
+        }
+
         fun sendReadReceipt(readUpToEpochMillis: Long) {
             synchronized(writeLock) {
                 out.writeInt(WIRE_MAGIC)
@@ -1538,6 +1550,15 @@ object TorOnionTransportManager {
                         val ct = readBytes(inp)
                         val chunkMap = incomingMediaChunksByTransferId.getOrPut(transferId) { ConcurrentHashMap() }
                         chunkMap[chunkIdx] = EncryptedFileChunk(chunkIdx, nonce12, ct)
+                        try {
+                            channel.sendMediaChunkAck(transferId, chunkIdx)
+                        } catch (_: Throwable) {
+                        }
+                    }
+                    FRAME_MEDIA_CHUNK_ACK -> {
+                        val transferId = inp.readUTF()
+                        val chunkIdx = inp.readInt()
+                        mediaChunkAckWaiters[transferId]?.get(chunkIdx)?.complete(Unit)
                     }
                     FRAME_READ_RECEIPT -> {
                         val readUpTo = inp.readLong()
@@ -2175,14 +2196,36 @@ object TorOnionTransportManager {
     ): Boolean = withContext(Dispatchers.IO) {
         val channel = livePeerChannels[peerOnion.lowercase()]?.takeIf { it.isAlive() } ?: return@withContext false
         val total = chunks.size
+        val isSocksTorChannel = channel.socket.inetAddress?.isLoopbackAddress == true
+        val ackMap = ConcurrentHashMap<Int, CompletableDeferred<Unit>>(total.coerceAtLeast(1))
+        for (i in 0 until total) {
+            ackMap[i] = CompletableDeferred()
+        }
+        mediaChunkAckWaiters[transferId] = ackMap
+        var peerSupportsChunkAck = true
         return@withContext try {
-            chunks.forEachIndexed { idx, chunk ->
-                channel.sendMediaChunk(transferId, chunk)
+            for (idx in 0 until total) {
+                if (!channel.isAlive()) return@withContext false
+                channel.sendMediaChunk(transferId, chunks[idx])
+                if (peerSupportsChunkAck) {
+                    val timeoutMs = if (idx == 0) 1200L else 5000L
+                    val acked = withTimeoutOrNull(timeoutMs) {
+                        ackMap[idx]?.await()
+                    }
+                    if (acked == null && idx == 0) {
+                        peerSupportsChunkAck = false
+                    }
+                }
                 onChunkProgress?.invoke(idx + 1, total)
+                if (!peerSupportsChunkAck && isSocksTorChannel && total > 1 && idx < total - 1) {
+                    delay(14L)
+                }
             }
             true
         } catch (_: Throwable) {
             false
+        } finally {
+            mediaChunkAckWaiters.remove(transferId)
         }
     }
 

@@ -71,7 +71,8 @@ data class EncryptedTransferProgress(
     val bytesTransferred: Long,
     val decryptedInMemoryBytes: ByteArray? = null,
     val failureReason: String? = null,
-    val uploadProgressFraction: Float? = null
+    val uploadProgressFraction: Float? = null,
+    val isStoredInRom: Boolean = false
 ) {
     fun effectiveFraction(): Float {
         uploadProgressFraction?.let { return it.coerceIn(0f, 1f) }
@@ -396,6 +397,13 @@ object EncryptedFileTransferEngine {
         return normalized
     }
 
+    fun chunkSizeForPayload(sizeBytes: Int): Int = when {
+        sizeBytes <= 64 * 1024 -> 1024          // 1 KiB chunks for <=64 KiB
+        sizeBytes <= 512 * 1024 -> 2 * 1024     // 2 KiB chunks (~50 steps for 100 KB video -> 1..2% smooth progress)
+        sizeBytes <= 2 * 1024 * 1024 -> 8 * 1024 // 8 KiB chunks
+        else -> CHUNK_SIZE_BYTES                 // 32 KiB chunks
+    }
+
     fun encryptAndChunkPayload(
         rawFileName: String,
         mimeType: String,
@@ -421,12 +429,13 @@ object EncryptedFileTransferEngine {
         val baseNonce12 = ByteArray(12).also { csprng.nextBytes(it) }
         val sha256Hex = MessageDigest.getInstance("SHA-256").digest(cleanPayload).toHex()
 
-        val totalChunks = (cleanPayload.size + CHUNK_SIZE_BYTES - 1) / CHUNK_SIZE_BYTES
+        val chunkSize = chunkSizeForPayload(cleanPayload.size)
+        val totalChunks = (cleanPayload.size + chunkSize - 1) / chunkSize
         val chunks = ArrayList<EncryptedFileChunk>(totalChunks)
 
         for (chunkIdx in 0 until totalChunks) {
-            val start = chunkIdx * CHUNK_SIZE_BYTES
-            val end = minOf(start + CHUNK_SIZE_BYTES, cleanPayload.size)
+            val start = chunkIdx * chunkSize
+            val end = minOf(start + chunkSize, cleanPayload.size)
             val slice = cleanPayload.copyOfRange(start, end)
             val chunkNonce = deriveChunkNonce(baseNonce12, chunkIdx)
             val aad = buildChunkAad(transferId, safeName, safeMime, chunkIdx, totalChunks, sha256Hex)

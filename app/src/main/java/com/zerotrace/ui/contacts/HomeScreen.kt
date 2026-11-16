@@ -80,13 +80,29 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.material.icons.automirrored.filled.DriveFileMove
+import androidx.compose.material.icons.filled.AudioFile
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.EnhancedEncryption
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SdStorage
+import androidx.compose.material3.Switch
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import com.zerotrace.bridge.CallMediaKind
+import com.zerotrace.bridge.MessagePayloadKind
 import com.zerotrace.bridge.PublicIdentitySummary
 import com.zerotrace.bridge.RichConversationMessage
 import com.zerotrace.bridge.SessionRatchetMetrics
 import com.zerotrace.bridge.VerifiedContactRecord
 import com.zerotrace.network.ConnectivityState
 import com.zerotrace.network.TorTransportBackend
+import com.zerotrace.security.ChatStorageBreakdown
 import com.zerotrace.ui.AppLanguage
 import com.zerotrace.ui.ConversationFilter
 import com.zerotrace.ui.ZeroTraceScreen
@@ -96,6 +112,7 @@ import com.zerotrace.ui.components.EmptyState
 import com.zerotrace.ui.components.ErrorState
 import com.zerotrace.ui.components.SecurityInformationCard
 import com.zerotrace.ui.components.ZeroTraceTopBar
+import com.zerotrace.ui.settings.formatBytesCompact
 import com.zerotrace.ui.theme.CrimsonDanger
 import com.zerotrace.ui.theme.MonospaceStyle
 import com.zerotrace.ui.theme.ZeroTracePalette
@@ -622,6 +639,16 @@ fun ContactProfileScreen(
     sharedMessagesInRam: List<RichConversationMessage>,
     disappearingTimerSec: Long,
     isBlocked: Boolean,
+    isKeepDataEnabled: Boolean = false,
+    storageBreakdown: ChatStorageBreakdown? = null,
+    statusBanner: String? = null,
+    onDismissBanner: () -> Unit = {},
+    onToggleKeepData: (Boolean) -> Unit = {},
+    onMoveRamToRom: () -> Unit = {},
+    onMoveRomToRam: () -> Unit = {},
+    onOpenStorageManager: () -> Unit = {},
+    onOpenMedia: (RichConversationMessage) -> Unit = {},
+    onSaveMedia: (RichConversationMessage) -> Unit = {},
     onBack: () -> Unit,
     onStartChat: () -> Unit,
     onStartVoiceCall: () -> Unit,
@@ -631,7 +658,26 @@ fun ContactProfileScreen(
     onClearChatHistoryRam: () -> Unit,
     onDeleteContact: () -> Unit
 ) {
-    val encryptedFilesCount = sharedMessagesInRam.count { it.fileTransfer != null }
+    val allMediaMessages = remember(sharedMessagesInRam) {
+        sharedMessagesInRam
+            .filter { !it.isDeletedPlaceholder && it.fileTransfer != null }
+            .sortedByDescending { it.timestampEpochMillis }
+    }
+    val encryptedFilesCount = allMediaMessages.size
+    var mediaFilterTab by remember { mutableStateOf(0) } // 0 = All, 1 = Photos & Videos, 2 = Docs & Audio
+    val filteredMediaMessages = remember(allMediaMessages, mediaFilterTab) {
+        when (mediaFilterTab) {
+            1 -> allMediaMessages.filter {
+                it.payloadKind == MessagePayloadKind.IMAGE || it.payloadKind == MessagePayloadKind.VIDEO
+            }
+            2 -> allMediaMessages.filter {
+                it.payloadKind == MessagePayloadKind.DOCUMENT ||
+                    it.payloadKind == MessagePayloadKind.AUDIO_FILE ||
+                    it.payloadKind == MessagePayloadKind.VOICE_NOTE
+            }
+            else -> allMediaMessages
+        }
+    }
     @Suppress("DEPRECATION")
     val clipboard = LocalClipboardManager.current
     var copiedPeerId by remember { mutableStateOf(false) }
@@ -639,7 +685,7 @@ fun ContactProfileScreen(
     Scaffold(
         topBar = {
             Surface(color = MaterialTheme.colorScheme.surface) {
-                Column {
+                Column(modifier = Modifier.statusBarsPadding()) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -884,7 +930,160 @@ fun ContactProfileScreen(
                 }
             }
 
-            // Shared Encrypted Media & Disappearing Session Settings
+            if (!statusBanner.isNullOrBlank()) {
+                item {
+                    Surface(
+                        color = ZeroTracePalette.mintContainer(),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onDismissBanner() }
+                    ) {
+                        Text(
+                            text = statusBanner,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = ZeroTracePalette.mintContent(),
+                            modifier = Modifier.padding(10.dp)
+                        )
+                    }
+                }
+            }
+
+            // Per-Chat Keep Data (Ultra-Encrypted ROM Vault) & RAM -> ROM Migration
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(
+                        1.dp,
+                        if (isKeepDataEnabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+                        else MaterialTheme.colorScheme.outline
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.EnhancedEncryption,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Keep Data (Encrypted ROM Vault)",
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = if (isKeepDataEnabled) {
+                                        "ON • Dual-cipher ChaCha20-Poly1305 (256-bit) + StrongBox AES-256-GCM ROM encryption."
+                                    } else {
+                                        "OFF • Chat & media stay in volatile RAM only. Turn ON to keep & encrypt in ROM."
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Switch(
+                                checked = isKeepDataEnabled,
+                                onCheckedChange = onToggleKeepData,
+                                modifier = Modifier.testTag("profile_keep_data_switch")
+                            )
+                        }
+
+                        if (storageBreakdown != null) {
+                            Surface(
+                                color = ZeroTracePalette.mintContainer(),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "RAM: ${formatBytesCompact(storageBreakdown.ramTotalBytes)} (${storageBreakdown.ramMessageCount}m)",
+                                        style = MonospaceStyle.copy(fontSize = 11.sp),
+                                        color = Color(0xFF0284C7)
+                                    )
+                                    Text(
+                                        text = "ROM: ${formatBytesCompact(storageBreakdown.romTotalBytes)} (${storageBreakdown.romMessageCount}m)",
+                                        style = MonospaceStyle.copy(fontSize = 11.sp),
+                                        color = ZeroTracePalette.mintContent()
+                                    )
+                                }
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = onMoveRamToRom,
+                                enabled = sharedMessagesInRam.isNotEmpty(),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("profile_move_ram_to_rom_btn")
+                            ) {
+                                Icon(
+                                    Icons.AutoMirrored.Filled.DriveFileMove,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Move RAM -> ROM",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            OutlinedButton(
+                                onClick = if ((storageBreakdown?.romTotalBytes ?: 0L) > 0L) onMoveRomToRam else onOpenStorageManager,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Default.SdStorage, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = if ((storageBreakdown?.romTotalBytes ?: 0L) > 0L) "Move ROM -> RAM" else "Storage & Data",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = onOpenStorageManager,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.SdStorage, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Open Full Storage & Data Manager", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+            }
+
+            // Sent & Received Media, Docs & Voice Gallery (visible directly on Chat Profile!)
             item {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -898,11 +1097,13 @@ fun ContactProfileScreen(
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "Encrypted Attachments in Volatile RAM",
-                                style = MaterialTheme.typography.bodyMedium
+                                text = "Media, Docs & Voice",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onSurface
                             )
                             Text(
                                 text = "$encryptedFilesCount file(s)",
@@ -910,6 +1111,118 @@ fun ContactProfileScreen(
                                 color = MaterialTheme.colorScheme.primary
                             )
                         }
+
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf(
+                                0 to "All (${allMediaMessages.size})",
+                                1 to "Photos & Videos",
+                                2 to "Docs & Audio"
+                            ).forEach { (idx, label) ->
+                                FilterChip(
+                                    selected = mediaFilterTab == idx,
+                                    onClick = { mediaFilterTab = idx },
+                                    label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                                    shape = RoundedCornerShape(50),
+                                    border = null
+                                )
+                            }
+                        }
+
+                        if (filteredMediaMessages.isEmpty()) {
+                            Text(
+                                text = "No sent or received media in this chat yet.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            filteredMediaMessages.take(40).forEach { mediaMsg ->
+                                val tr = mediaMsg.fileTransfer ?: return@forEach
+                                val bytes = tr.decryptedInMemoryBytes
+                                val thumb = if (mediaMsg.payloadKind == MessagePayloadKind.IMAGE && bytes != null) {
+                                    remember(mediaMsg.id, bytes.size) {
+                                        try {
+                                            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                                        } catch (_: Throwable) {
+                                            null
+                                        }
+                                    }
+                                } else null
+
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surface,
+                                    shape = RoundedCornerShape(12.dp),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.55f)),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onOpenMedia(mediaMsg) }
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(48.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(ZeroTracePalette.mintContainer()),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            if (thumb != null) {
+                                                Image(
+                                                    bitmap = thumb,
+                                                    contentDescription = tr.manifest.sanitizedFileName,
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier.fillMaxSize()
+                                                )
+                                            } else {
+                                                val icon = when (mediaMsg.payloadKind) {
+                                                    MessagePayloadKind.IMAGE -> Icons.Default.Image
+                                                    MessagePayloadKind.VIDEO -> Icons.Default.PlayArrow
+                                                    MessagePayloadKind.AUDIO_FILE,
+                                                    MessagePayloadKind.VOICE_NOTE -> Icons.Default.AudioFile
+                                                    else -> Icons.Default.Description
+                                                }
+                                                Icon(
+                                                    imageVector = icon,
+                                                    contentDescription = null,
+                                                    tint = ZeroTracePalette.mintContent(),
+                                                    modifier = Modifier.size(24.dp)
+                                                )
+                                            }
+                                        }
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = tr.manifest.sanitizedFileName,
+                                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            val dirLabel = if (mediaMsg.isOutgoing) "Sent" else "Received"
+                                            val locLabel = if (tr.isStoredInRom) "ROM" else "RAM"
+                                            Text(
+                                                text = "$dirLabel • ${formatBytesCompact(tr.manifest.totalSizeBytes.toLong())} • $locLabel",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        IconButton(onClick = { onSaveMedia(mediaMsg) }) {
+                                            Icon(
+                                                imageVector = Icons.Default.Download,
+                                                contentDescription = "Save to Gallery",
+                                                tint = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
                         Row(
                             modifier = Modifier.fillMaxWidth(),

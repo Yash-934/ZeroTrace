@@ -297,7 +297,7 @@ class ExampleUnitTest {
 
     @Test
     fun testEncryptedChunkedFileTransferAndTamperRejection() {
-        // Create a 75 KiB payload (spans 3 x 32 KiB chunks)
+        // Create a 75 KiB payload (spans 38 x 2 KiB adaptive chunks for granular <= 256 KiB progress)
         val rawPayload = ByteArray(75 * 1024) { idx -> ((idx * 31 + 17) and 0xFF).toByte() }
         val bundle = com.zerotrace.bridge.EncryptedFileTransferEngine.encryptAndChunkPayload(
             rawFileName = "../../secret_folder/audit_report.pdf",
@@ -309,7 +309,9 @@ class ExampleUnitTest {
         // Verify path traversal is sanitized
         assertFalse(bundle.manifest.sanitizedFileName.contains(".."))
         assertFalse(bundle.manifest.sanitizedFileName.contains("/"))
-        assertEquals(3, bundle.manifest.totalChunks)
+        val expectedChunkSize = com.zerotrace.bridge.EncryptedFileTransferEngine.chunkSizeForPayload(rawPayload.size)
+        val expectedChunks = (rawPayload.size + expectedChunkSize - 1) / expectedChunkSize
+        assertEquals(expectedChunks, bundle.manifest.totalChunks)
         assertEquals(32, bundle.fileSecretKey32.size)
 
         // Verify round-trip decryption and SHA-256 integrity check
@@ -323,11 +325,9 @@ class ExampleUnitTest {
         // Verify tampering with a single byte in chunk #1 is rejected by ChaCha20-Poly1305 AEAD
         val tamperedChunk = bundle.chunks[1].ciphertextWithTag.copyOf()
         tamperedChunk[10] = (tamperedChunk[10].toInt() xor 0xFF).toByte()
-        val corruptedList = listOf(
-            bundle.chunks[0],
-            bundle.chunks[1].copy(ciphertextWithTag = tamperedChunk),
-            bundle.chunks[2]
-        )
+        val corruptedList = bundle.chunks.mapIndexed { idx, chunk ->
+            if (idx == 1) chunk.copy(ciphertextWithTag = tamperedChunk) else chunk
+        }
         try {
             com.zerotrace.bridge.EncryptedFileTransferEngine.decryptAndVerifyChunks(
                 manifest = bundle.manifest,

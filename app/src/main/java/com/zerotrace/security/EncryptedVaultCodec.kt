@@ -42,7 +42,8 @@ data class PersistedPrefsSnapshot(
     val pinnedOnions: Set<String> = emptySet(),
     val mutedOnions: Set<String> = emptySet(),
     val archivedOnions: Set<String> = emptySet(),
-    val blockedOnions: Set<String> = emptySet()
+    val blockedOnions: Set<String> = emptySet(),
+    val keepDataOnions: Set<String> = emptySet()
 )
 
 data class PersistedChatVaultSnapshot(
@@ -98,6 +99,7 @@ object EncryptedVaultCodec {
             writeStringSet(out, snapshot.mutedOnions)
             writeStringSet(out, snapshot.archivedOnions)
             writeStringSet(out, snapshot.blockedOnions)
+            writeStringSet(out, snapshot.keepDataOnions)
         }
         return baos.toByteArray()
     }
@@ -131,6 +133,7 @@ object EncryptedVaultCodec {
                 val muted = readStringSet(inp)
                 val archived = readStringSet(inp)
                 val blocked = readStringSet(inp)
+                val keepData = if (inp.available() > 0) readStringSet(inp) else emptySet()
 
                 PersistedPrefsSnapshot(
                     profile = LocalUserProfile(
@@ -155,7 +158,8 @@ object EncryptedVaultCodec {
                     pinnedOnions = pinned,
                     mutedOnions = muted,
                     archivedOnions = archived,
-                    blockedOnions = blocked
+                    blockedOnions = blocked,
+                    keepDataOnions = keepData
                 )
             }
         } catch (_: Exception) {

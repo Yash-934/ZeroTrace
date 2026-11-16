@@ -117,6 +117,9 @@ fun ZeroTraceSettingsScreen(
     volatileMessagesInRamCount: Int,
     volatileStatusesInRamCount: Int,
     volatileCallsInRamCount: Int,
+    totalRamBytes: Long = 0L,
+    totalRomBytes: Long = 0L,
+    keepDataChatsCount: Int = 0,
     statusBanner: String? = null,
     errorBanner: String? = null,
     onDismissBanner: () -> Unit = {},
@@ -390,9 +393,14 @@ fun ZeroTraceSettingsScreen(
 
             SettingsNavRow(
                 icon = Icons.Default.AccessTime,
-                title = if (isHi) "स्टोरेज और अस्थिर RAM" else "Storage & Data",
-                subtitle = "$volatileMessagesInRamCount msgs, $volatileStatusesInRamCount statuses, $volatileCallsInRamCount calls in RAM",
-                onClick = onWipeVolatileCaches
+                title = if (isHi) "स्टोरेज और डेटा (RAM / ROM)" else "Storage & Data",
+                subtitle = if (totalRamBytes > 0L || totalRomBytes > 0L || keepDataChatsCount > 0) {
+                    "RAM: ${formatBytesCompact(totalRamBytes)} ($volatileMessagesInRamCount msgs) • ROM: ${formatBytesCompact(totalRomBytes)} ($keepDataChatsCount Keep-Data)"
+                } else {
+                    "$volatileMessagesInRamCount msgs, $volatileStatusesInRamCount statuses, $volatileCallsInRamCount calls in RAM • Tap to manage"
+                },
+                onClick = { onNavigate(ZeroTraceScreen.STORAGE_AND_DATA) },
+                modifier = Modifier.testTag("settings_storage_and_data_row")
             )
 
             SettingsNavRow(
