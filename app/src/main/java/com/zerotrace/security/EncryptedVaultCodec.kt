@@ -3,7 +3,9 @@ package com.zerotrace.security
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
 import android.net.Uri
+import android.os.Build
 import com.zerotrace.bridge.CallMediaKind
 import com.zerotrace.bridge.EncryptedFileManifest
 import com.zerotrace.bridge.EncryptedTransferProgress
@@ -505,9 +507,11 @@ object EncryptedVaultCodec {
     fun compressAvatarUriToCompactJpeg(context: Context, uri: Uri): ByteArray {
         val resolver = context.contentResolver
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        resolver.openInputStream(uri)?.use { stream ->
+        val boundsStream = resolver.openInputStream(uri)
+            ?: throw IllegalStateException("Cannot read selected image")
+        boundsStream.use { stream ->
             BitmapFactory.decodeStream(stream, null, bounds)
-        } ?: throw IllegalStateException("Cannot read selected image")
+        }
 
         val maxSide = maxOf(bounds.outWidth, bounds.outHeight)
         var sample = 1
@@ -518,17 +522,34 @@ object EncryptedVaultCodec {
             inSampleSize = sample
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
-        val decoded = resolver.openInputStream(uri)?.use { stream ->
+        val decoded: Bitmap = resolver.openInputStream(uri)?.use { stream ->
             BitmapFactory.decodeStream(stream, null, decodeOpts)
-        } ?: throw IllegalStateException("Unsupported image format")
+        } ?: if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val source = ImageDecoder.createSource(resolver, uri)
+            ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                val w = info.size.width
+                val h = info.size.height
+                val largest = maxOf(w, h)
+                if (largest > 512) {
+                    val scale = 512f / largest.toFloat()
+                    decoder.setTargetSize(
+                        (w * scale).toInt().coerceAtLeast(1),
+                        (h * scale).toInt().coerceAtLeast(1)
+                    )
+                }
+            }
+        } else {
+            throw IllegalStateException("Unsupported image format")
+        }
 
         val dim = minOf(decoded.width, decoded.height).coerceAtLeast(1)
         val xOff = ((decoded.width - dim) / 2).coerceAtLeast(0)
         val yOff = ((decoded.height - dim) / 2).coerceAtLeast(0)
         val square = Bitmap.createBitmap(decoded, xOff, yOff, dim, dim)
         val scaled = Bitmap.createScaledBitmap(square, 160, 160, true)
-        if (square !== decoded) square.recycle()
-        if (scaled !== decoded) decoded.recycle()
+        if (square !== decoded && square !== scaled) square.recycle()
+        if (decoded !== scaled && !decoded.isRecycled) decoded.recycle()
 
         var quality = 82
         var outBytes: ByteArray

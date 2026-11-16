@@ -912,48 +912,68 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
     ) {
         val cleanName = displayName.trim().take(48).ifEmpty { "ZeroTrace User" }
         val cleanBio = bio.trim().take(160)
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                val resolvedAvatar = when {
-                    removeAvatar -> null
-                    newAvatarUri != null -> EncryptedVaultCodec.compressAvatarUriToCompactJpeg(appContext, newAvatarUri)
-                    else -> _uiState.value.localProfile.avatarJpegBytes
-                }
-                val updated = LocalUserProfile(
+        // Update display name & bio optimistically on main state immediately
+        _uiState.update { state ->
+            val currentAvatar = if (removeAvatar) null else state.localProfile.avatarJpegBytes
+            state.copy(
+                localProfile = state.localProfile.copy(
                     displayName = cleanName,
                     bio = cleanBio,
-                    avatarJpegBytes = resolvedAvatar,
+                    avatarJpegBytes = currentAvatar,
                     updatedAtEpochSec = System.currentTimeMillis() / 1000L
-                )
-                _uiState.update {
-                    it.copy(
-                        localProfile = updated,
-                        statusBannerMessage = isHi(
+                ),
+                errorBannerMessage = null
+            )
+        }
+
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            var photoError: String? = null
+            val resolvedAvatar = when {
+                removeAvatar -> null
+                newAvatarUri != null -> try {
+                    EncryptedVaultCodec.compressAvatarUriToCompactJpeg(appContext, newAvatarUri)
+                } catch (t: Throwable) {
+                    photoError = t.message ?: "Unable to process selected photo"
+                    _uiState.value.localProfile.avatarJpegBytes
+                }
+                else -> _uiState.value.localProfile.avatarJpegBytes
+            }
+
+            val updated = LocalUserProfile(
+                displayName = cleanName,
+                bio = cleanBio,
+                avatarJpegBytes = resolvedAvatar,
+                updatedAtEpochSec = System.currentTimeMillis() / 1000L
+            )
+            _uiState.update {
+                it.copy(
+                    localProfile = updated,
+                    statusBannerMessage = if (photoError == null) {
+                        isHi(
                             "प्रोफ़ाइल अपडेट और एन्क्रिप्टेड रूप से सहेजा गया।",
                             "Profile saved under Keystore AES-256-GCM & synced to active peers."
                         )
-                    )
-                }
-                persistPrefsToKeystore()
-                val wireEnv = E2eeChatEnvelope.encodeProfile(
-                    displayName = updated.displayName,
-                    bio = updated.bio,
-                    avatarBytes = updated.avatarJpegBytes
-                )
-                for (contact in _uiState.value.verifiedContacts) {
-                    if (TorOnionTransportManager.isLoopbackVerificationContact(contact)) continue
-                    val handle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress)
-                    if (handle != null && TorOnionTransportManager.isPeerConnectedOnMesh(contact.onionAddress)) {
-                        TorOnionTransportManager.sendEncryptedMessageOverCircuit(
-                            sessionHandle = handle,
-                            plaintext = wireEnv,
-                            contact = contact
-                        )
+                    } else null,
+                    errorBannerMessage = photoError?.let { err ->
+                        isHi("नाम/बायो सहेजा गया, लेकिन फ़ोटो त्रुटि: $err", "Name saved, photo failed: $err")
                     }
-                }
-            } catch (t: Throwable) {
-                _uiState.update {
-                    it.copy(errorBannerMessage = "Profile update failed: ${t.message ?: "Unable to process image"}")
+                )
+            }
+            writePrefsSnapshotToKeystoreSync()
+            val wireEnv = E2eeChatEnvelope.encodeProfile(
+                displayName = updated.displayName,
+                bio = updated.bio,
+                avatarBytes = updated.avatarJpegBytes
+            )
+            for (contact in _uiState.value.verifiedContacts) {
+                if (TorOnionTransportManager.isLoopbackVerificationContact(contact)) continue
+                val handle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress)
+                if (handle != null && TorOnionTransportManager.isPeerConnectedOnMesh(contact.onionAddress)) {
+                    TorOnionTransportManager.sendEncryptedMessageOverCircuit(
+                        sessionHandle = handle,
+                        plaintext = wireEnv,
+                        contact = contact
+                    )
                 }
             }
         }
@@ -3466,35 +3486,39 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         val check = _uiState.value
         if (check.identitySummary == null && !keystoreManager.hasStoredIdentity()) return
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            synchronized(vaultPersistLock) {
-                val state = _uiState.value
-                if (state.identitySummary == null && !keystoreManager.hasStoredIdentity()) return@synchronized
-                val snapshot = PersistedPrefsSnapshot(
-                    profile = state.localProfile,
-                    foreverVaultEnabled = state.foreverVaultEnabled,
-                    sessionTimeoutSeconds = state.sessionTimeoutSeconds,
-                    disappearingMessageTimerSec = state.disappearingMessageTimerSec,
-                    biometricAppLockEnabled = state.biometricAppLockEnabled,
-                    flagSecureEnabled = state.flagSecureEnabled,
-                    autoLockOnBackground = state.autoLockOnBackground,
-                    readReceiptsEnabled = state.readReceiptsEnabled,
-                    typingIndicatorsEnabled = state.typingIndicatorsEnabled,
-                    metadataMinimizedMode = state.metadataMinimizedMode,
-                    themeModeName = state.themeMode.name,
-                    accentPaletteName = state.accentPalette.name,
-                    wallpaperStyleName = state.wallpaperStyle.name,
-                    languageCode = state.language.code,
-                    pinnedOnions = state.pinnedOnions,
-                    mutedOnions = state.mutedOnions,
-                    archivedOnions = state.archivedOnions,
-                    blockedOnions = state.blockedOnions
-                )
-                val encoded = EncryptedVaultCodec.encodePrefsAndProfile(snapshot)
-                try {
-                    keystoreManager.saveWrappedPrefsAndProfile(encoded)
-                } finally {
-                    Arrays.fill(encoded, 0.toByte())
-                }
+            writePrefsSnapshotToKeystoreSync()
+        }
+    }
+
+    private fun writePrefsSnapshotToKeystoreSync() {
+        synchronized(vaultPersistLock) {
+            val state = _uiState.value
+            if (state.identitySummary == null && !keystoreManager.hasStoredIdentity()) return
+            val snapshot = PersistedPrefsSnapshot(
+                profile = state.localProfile,
+                foreverVaultEnabled = state.foreverVaultEnabled,
+                sessionTimeoutSeconds = state.sessionTimeoutSeconds,
+                disappearingMessageTimerSec = state.disappearingMessageTimerSec,
+                biometricAppLockEnabled = state.biometricAppLockEnabled,
+                flagSecureEnabled = state.flagSecureEnabled,
+                autoLockOnBackground = state.autoLockOnBackground,
+                readReceiptsEnabled = state.readReceiptsEnabled,
+                typingIndicatorsEnabled = state.typingIndicatorsEnabled,
+                metadataMinimizedMode = state.metadataMinimizedMode,
+                themeModeName = state.themeMode.name,
+                accentPaletteName = state.accentPalette.name,
+                wallpaperStyleName = state.wallpaperStyle.name,
+                languageCode = state.language.code,
+                pinnedOnions = state.pinnedOnions,
+                mutedOnions = state.mutedOnions,
+                archivedOnions = state.archivedOnions,
+                blockedOnions = state.blockedOnions
+            )
+            val encoded = EncryptedVaultCodec.encodePrefsAndProfile(snapshot)
+            try {
+                keystoreManager.saveWrappedPrefsAndProfile(encoded)
+            } finally {
+                Arrays.fill(encoded, 0.toByte())
             }
         }
     }

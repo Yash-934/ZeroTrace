@@ -119,4 +119,44 @@ class ExampleRobolectricTest {
         )
         launcher.unregister()
     }
+
+    @Test
+    fun testCompressAvatarUriToCompactJpegAndPrefsRoundTrip() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val tempFile = java.io.File(context.cacheDir, "test_avatar_source.png")
+        try {
+            val sourceBitmap = android.graphics.Bitmap.createBitmap(
+                240,
+                160,
+                android.graphics.Bitmap.Config.ARGB_8888
+            )
+            sourceBitmap.eraseColor(android.graphics.Color.rgb(37, 211, 102))
+            java.io.FileOutputStream(tempFile).use { out ->
+                assertTrue(sourceBitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out))
+            }
+            sourceBitmap.recycle()
+
+            val compressedJpeg = com.zerotrace.security.EncryptedVaultCodec
+                .compressAvatarUriToCompactJpeg(context, android.net.Uri.fromFile(tempFile))
+            assertTrue("Compressed avatar JPEG must be non-empty", compressedJpeg.isNotEmpty())
+            assertTrue("Compressed avatar JPEG must fit within 24 KiB", compressedJpeg.size <= 24 * 1024)
+
+            val snapshot = com.zerotrace.security.PersistedPrefsSnapshot(
+                profile = com.zerotrace.bridge.LocalUserProfile(
+                    displayName = "Rahul Sharma",
+                    bio = "ZeroTrace active",
+                    avatarJpegBytes = compressedJpeg,
+                    updatedAtEpochSec = 1_700_000_000L
+                )
+            )
+            val encoded = com.zerotrace.security.EncryptedVaultCodec.encodePrefsAndProfile(snapshot)
+            val decoded = com.zerotrace.security.EncryptedVaultCodec.decodePrefsAndProfile(encoded)
+            assertNotNull(decoded)
+            assertEquals("Rahul Sharma", decoded!!.profile.displayName)
+            assertEquals("ZeroTrace active", decoded.profile.bio)
+            assertArrayEquals(compressedJpeg, decoded.profile.avatarJpegBytes)
+        } finally {
+            tempFile.delete()
+        }
+    }
 }

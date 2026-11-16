@@ -217,9 +217,10 @@ object QrCodeEngine {
         return try {
             val resolver = context.contentResolver
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            resolver.openInputStream(uri)?.use { stream ->
+            val boundsStream = resolver.openInputStream(uri) ?: return null
+            boundsStream.use { stream ->
                 BitmapFactory.decodeStream(stream, null, bounds)
-            } ?: return null
+            }
 
             val maxSide = maxOf(bounds.outWidth, bounds.outHeight)
             var sample = 1

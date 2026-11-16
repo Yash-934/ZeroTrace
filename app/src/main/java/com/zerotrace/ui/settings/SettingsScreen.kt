@@ -1,7 +1,9 @@
 package com.zerotrace.ui.settings
 
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.BackHandler
 import com.zerotrace.media.rememberSafeMediaPicker
 import androidx.compose.foundation.BorderStroke
@@ -115,6 +117,9 @@ fun ZeroTraceSettingsScreen(
     volatileMessagesInRamCount: Int,
     volatileStatusesInRamCount: Int,
     volatileCallsInRamCount: Int,
+    statusBanner: String? = null,
+    errorBanner: String? = null,
+    onDismissBanner: () -> Unit = {},
     onUpdateLocalProfile: (String, String, Uri?, Boolean) -> Unit = { _, _, _, _ -> },
     onSelectThemeMode: (AppThemeMode) -> Unit,
     onSelectAccentPalette: (AccentPalette) -> Unit,
@@ -247,6 +252,41 @@ fun ZeroTraceSettingsScreen(
                 .verticalScroll(rememberScrollState())
                 .testTag("settings_screen")
         ) {
+            if (!errorBanner.isNullOrBlank()) {
+                Surface(
+                    color = CrimsonDanger.copy(alpha = 0.12f),
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(1.dp, CrimsonDanger.copy(alpha = 0.45f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                        .clickable { onDismissBanner() }
+                ) {
+                    Text(
+                        text = errorBanner,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = CrimsonDanger,
+                        modifier = Modifier.padding(10.dp)
+                    )
+                }
+            } else if (!statusBanner.isNullOrBlank()) {
+                Surface(
+                    color = ZeroTracePalette.mintContainer(),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                        .clickable { onDismissBanner() }
+                ) {
+                    Text(
+                        text = statusBanner,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ZeroTracePalette.mintContent(),
+                        modifier = Modifier.padding(10.dp)
+                    )
+                }
+            }
+
             // WhatsApp-style Editable User Profile Header Card
             Row(
                 modifier = Modifier
@@ -975,14 +1015,17 @@ private fun EditLocalProfileDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    var nameDraft by remember { mutableStateOf(initialProfile.displayName) }
-    var bioDraft by remember { mutableStateOf(initialProfile.bio) }
-    var pickedAvatarUri by rememberSaveable { mutableStateOf<Uri?>(null) }
+    var nameDraft by rememberSaveable { mutableStateOf(initialProfile.displayName) }
+    var bioDraft by rememberSaveable { mutableStateOf(initialProfile.bio) }
+    var pickedAvatarUriString by rememberSaveable { mutableStateOf<String?>(null) }
     var removePhoto by rememberSaveable { mutableStateOf(false) }
+    val pickedAvatarUri = remember(pickedAvatarUriString) {
+        pickedAvatarUriString?.let { Uri.parse(it) }
+    }
 
     val mediaPicker = rememberSafeMediaPicker(
         onImagePicked = { uri ->
-            pickedAvatarUri = uri
+            pickedAvatarUriString = uri.toString()
             removePhoto = false
         }
     )
@@ -1001,9 +1044,25 @@ private fun EditLocalProfileDialog(
                     sample *= 2
                 }
                 val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-                resolver.openInputStream(uri)?.use { stream ->
-                    BitmapFactory.decodeStream(stream, null, opts)?.asImageBitmap()
-                }
+                val bmp = resolver.openInputStream(uri)?.use { stream ->
+                    BitmapFactory.decodeStream(stream, null, opts)
+                } ?: if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    val src = ImageDecoder.createSource(resolver, uri)
+                    ImageDecoder.decodeBitmap(src) { decoder, info, _ ->
+                        decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                        val w = info.size.width
+                        val h = info.size.height
+                        val largest = maxOf(w, h)
+                        if (largest > 360) {
+                            val scale = 360f / largest.toFloat()
+                            decoder.setTargetSize(
+                                (w * scale).toInt().coerceAtLeast(1),
+                                (h * scale).toInt().coerceAtLeast(1)
+                            )
+                        }
+                    }
+                } else null
+                bmp?.asImageBitmap()
             } catch (_: Throwable) {
                 null
             }
@@ -1061,7 +1120,7 @@ private fun EditLocalProfileDialog(
                     if (!removePhoto && (pickedAvatarUri != null || initialProfile.avatarJpegBytes != null)) {
                         TextButton(
                             onClick = {
-                                pickedAvatarUri = null
+                                pickedAvatarUriString = null
                                 removePhoto = true
                             }
                         ) {
