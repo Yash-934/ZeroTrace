@@ -515,6 +515,14 @@ class ExampleUnitTest {
 
     @Test
     fun testTorEd25519V3KeyExpansionAndLegacyIdentityMigration() {
+        // 0. Verify SHA3-256 Tor v3 onion checksum matches Tor Project's canonical v3 onion vector
+        val torProjectPub32 = "d1b38b83a83b3ed918c5bb69dd444ad56bc8d5835a914de73447474e5f02591b"
+            .chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        assertEquals(
+            "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion",
+            RustCoreBridge.deriveV3OnionAddress(torProjectPub32)
+        )
+
         // 1. Fresh identity must include 32-byte private Tor v3 seed and valid ED25519-V3 blob
         val (summary, ztieBundle) = RustCoreBridge.generateNewDeviceIdentity()
         val torBlob = RustCoreBridge.exportTorAddOnionPrivateKeyBlob()

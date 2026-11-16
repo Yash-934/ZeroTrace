@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicLong
 import org.bouncycastle.crypto.AsymmetricCipherKeyPair
 import org.bouncycastle.crypto.agreement.X25519Agreement
 import org.bouncycastle.crypto.digests.SHA256Digest
+import org.bouncycastle.crypto.digests.SHA3Digest
 import org.bouncycastle.crypto.generators.HKDFBytesGenerator
 import org.bouncycastle.crypto.macs.HMac
 import org.bouncycastle.crypto.modes.ChaCha20Poly1305
@@ -541,15 +542,18 @@ object RustCoreBridge {
     }
 
     /**
-     * Derives a canonical 56-character base32 v3 `.onion` address from a 32-byte Ed25519 public key.
+     * Derives a canonical 56-character base32 v3 `.onion` address from a 32-byte Ed25519 public key
+     * per Tor `rend-spec-v3.txt` (`SHA3-256(".onion checksum" || pubkey || 0x03)`).
      */
     fun deriveV3OnionAddress(onionEd25519PubKey32: ByteArray): String {
         require(onionEd25519PubKey32.size == 32)
-        val md = MessageDigest.getInstance("SHA-256")
-        md.update(".onion checksum".toByteArray(Charsets.UTF_8))
-        md.update(onionEd25519PubKey32)
-        md.update(0x03.toByte())
-        val checksum = md.digest()
+        val prefix = ".onion checksum".toByteArray(Charsets.UTF_8)
+        val sha3 = SHA3Digest(256)
+        sha3.update(prefix, 0, prefix.size)
+        sha3.update(onionEd25519PubKey32, 0, 32)
+        sha3.update(0x03.toByte())
+        val checksum = ByteArray(32)
+        sha3.doFinal(checksum, 0)
 
         val raw = ByteArray(35)
         System.arraycopy(onionEd25519PubKey32, 0, raw, 0, 32)
