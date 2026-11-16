@@ -710,8 +710,15 @@ object EncryptedCallMediaEngine {
             }
         }
 
-        // If callee, attempt dedicated TCP media socket connection to caller's ephemeral listener
-        if (!isCaller && !remoteHost.isNullOrBlank() && remoteMediaPort != null && remoteMediaPort > 0) {
+        // If callee, attempt dedicated TCP media socket connection to caller's ephemeral listener.
+        // Over Tor Onion Service circuits, inbound peer host is loopback (127.0.0.1), so skip
+        // dialing localhost and stream encrypted call frames directly over the Tor tunnel.
+        if (!isCaller &&
+            !remoteHost.isNullOrBlank() &&
+            !isLoopbackHost(remoteHost) &&
+            remoteMediaPort != null &&
+            remoteMediaPort > 0
+        ) {
             scope.launch {
                 try {
                     val sock = Socket()
@@ -726,6 +733,11 @@ object EncryptedCallMediaEngine {
 
         startPriorityWriterLoop()
         startAudioCaptureAndPlayback()
+    }
+
+    private fun isLoopbackHost(host: String): Boolean {
+        val cleaned = host.trim().lowercase()
+        return cleaned == "127.0.0.1" || cleaned == "::1" || cleaned == "localhost"
     }
 
     @Synchronized

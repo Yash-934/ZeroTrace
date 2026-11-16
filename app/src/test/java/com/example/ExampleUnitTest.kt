@@ -512,6 +512,183 @@ class ExampleUnitTest {
         assertEquals(0xFF.toByte(), stripped[0])
         assertEquals(0xD8.toByte(), stripped[1])
     }
+
+    @Test
+    fun testTorEd25519V3KeyExpansionAndLegacyIdentityMigration() {
+        // 1. Fresh identity must include 32-byte private Tor v3 seed and valid ED25519-V3 blob
+        val (summary, ztieBundle) = RustCoreBridge.generateNewDeviceIdentity()
+        val torBlob = RustCoreBridge.exportTorAddOnionPrivateKeyBlob()
+        assertNotNull(torBlob)
+        assertTrue(torBlob!!.startsWith("ED25519-V3:"))
+        val decoded64 = java.util.Base64.getDecoder().decode(torBlob.removePrefix("ED25519-V3:"))
+        assertEquals(64, decoded64.size)
+        // RFC 8032 scalar clamping bits check
+        assertEquals(0, decoded64[0].toInt() and 0x07)
+        assertEquals(0, decoded64[31].toInt() and 0x80)
+        assertNotEquals(0, decoded64[31].toInt() and 0x40)
+
+        // Deterministic seed expansion consistency
+        val fixedSeed = ByteArray(32) { (it * 7 + 3).toByte() }
+        val expanded1 = RustCoreBridge.buildTorAddOnionPrivateKeyParam(fixedSeed)
+        val expanded2 = RustCoreBridge.buildTorAddOnionPrivateKeyParam(fixedSeed)
+        assertEquals(expanded1, expanded2)
+
+        // 2. Legacy ZTID migration test: parse ZTIE and rewrite as 9-field ZTID omitting private seed
+        val ztidBytes = java.io.DataInputStream(java.io.ByteArrayInputStream(ztieBundle)).use { inp ->
+            assertEquals(0x5A544945, inp.readInt()) // "ZTIE"
+            val fields = ArrayList<ByteArray>(10)
+            for (i in 0 until 10) {
+                val len = inp.readInt()
+                fields.add(ByteArray(len).also { inp.readFully(it) })
+            }
+            val baos = java.io.ByteArrayOutputStream()
+            java.io.DataOutputStream(baos).use { out ->
+                out.writeInt(0x5A544944) // "ZTID"
+                for (i in 0 until 8) {
+                    out.writeInt(fields[i].size)
+                    out.write(fields[i])
+                }
+                // Field 8 in ZTID was only the public key
+                out.writeInt(fields[9].size)
+                out.write(fields[9])
+            }
+            baos.toByteArray()
+        }
+
+        val restoredLegacy = RustCoreBridge.restoreWrappedIdentity(ztidBytes)
+        assertEquals(summary.onionAddress, restoredLegacy.onionAddress)
+        assertEquals(null, RustCoreBridge.exportTorAddOnionPrivateKeyBlob())
+
+        val migrated = RustCoreBridge.migrateLegacyOnionSeedIfNeeded()
+        assertNotNull(migrated)
+        val (migratedSummary, upgradedBundle) = migrated!!
+        val migratedBlob = RustCoreBridge.exportTorAddOnionPrivateKeyBlob()
+        assertNotNull(migratedBlob)
+        assertTrue(migratedBlob!!.startsWith("ED25519-V3:"))
+
+        // Re-restoring upgraded ZTIE preserves exact onion and private Tor key blob
+        val reRestored = RustCoreBridge.restoreWrappedIdentity(upgradedBundle)
+        assertEquals(migratedSummary.onionAddress, reRestored.onionAddress)
+        assertEquals(migratedBlob, RustCoreBridge.exportTorAddOnionPrivateKeyBlob())
+    }
+
+    @Test
+    fun testEmbeddedTorSocks5Rfc1928DomainDialAndFailClosed() {
+        val (summary, _) = RustCoreBridge.generateNewDeviceIdentity()
+        val peerOnion = summary.onionAddress
+
+        // Reject clearnet destination & non-loopback SOCKS host before opening any socket
+        try {
+            com.zerotrace.network.EmbeddedTorEngine.connectToOnionOverSocks5(
+                peerOnion = "example.com",
+                targetPort = 9443,
+                socksHost = "127.0.0.1",
+                socksPort = 9050
+            )
+            fail("Expected clearnet destination to throw SecurityException")
+        } catch (expected: SecurityException) {
+            assertTrue(expected.message!!.contains("FAIL_CLOSED_VIOLATION"))
+        }
+
+        try {
+            com.zerotrace.network.EmbeddedTorEngine.connectToOnionOverSocks5(
+                peerOnion = peerOnion,
+                targetPort = 9443,
+                socksHost = "8.8.8.8",
+                socksPort = 9050
+            )
+            fail("Expected public SOCKS host to throw SecurityException")
+        } catch (expected: SecurityException) {
+            assertTrue(expected.message!!.contains("FAIL_CLOSED_VIOLATION"))
+        }
+
+        // Mock local Tor SOCKS5 server verifying RFC 1928 ATYP=0x03 domain tunneling
+        val server = java.net.ServerSocket(0, 4, java.net.InetAddress.getByName("127.0.0.1"))
+        val serverErr = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+        val serverThread = Thread {
+            try {
+                // Connection 1: Expect valid CONNECT and echo tunnel bytes
+                server.accept().use { client ->
+                    val inp = java.io.DataInputStream(client.getInputStream())
+                    val out = client.getOutputStream()
+                    val greeting = ByteArray(3).also { inp.readFully(it) }
+                    assertArrayEquals(byteArrayOf(0x05, 0x01, 0x00), greeting)
+                    out.write(byteArrayOf(0x05, 0x00))
+                    out.flush()
+
+                    val hdr = ByteArray(5).also { inp.readFully(it) }
+                    assertEquals(0x05.toByte(), hdr[0]) // VER
+                    assertEquals(0x01.toByte(), hdr[1]) // CONNECT
+                    assertEquals(0x03.toByte(), hdr[3]) // ATYP = DOMAINNAME
+                    val domainLen = hdr[4].toInt() and 0xFF
+                    assertEquals(peerOnion.length, domainLen)
+                    val hostBytes = ByteArray(domainLen).also { inp.readFully(it) }
+                    assertEquals(peerOnion, String(hostBytes, Charsets.US_ASCII))
+                    val portHi = inp.readUnsignedByte()
+                    val portLo = inp.readUnsignedByte()
+                    assertEquals(9443, (portHi shl 8) or portLo)
+
+                    out.write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x24, 0xDF.toByte()))
+                    out.flush()
+
+                    val payload = ByteArray(4).also { inp.readFully(it) }
+                    assertEquals("PING", String(payload, Charsets.UTF_8))
+                    out.write("PONG".toByteArray(Charsets.UTF_8))
+                    out.flush()
+                }
+
+                // Connection 2: Simulate Tor circuit unreachable (REP = 0x04)
+                server.accept().use { client ->
+                    val inp = java.io.DataInputStream(client.getInputStream())
+                    val out = client.getOutputStream()
+                    inp.readFully(ByteArray(3))
+                    out.write(byteArrayOf(0x05, 0x00))
+                    out.flush()
+                    val hdr = ByteArray(5).also { inp.readFully(it) }
+                    inp.readFully(ByteArray((hdr[4].toInt() and 0xFF) + 2))
+                    out.write(byteArrayOf(0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
+                    out.flush()
+                }
+            } catch (t: Throwable) {
+                serverErr.set(t)
+            }
+        }
+        serverThread.start()
+
+        try {
+            com.zerotrace.network.EmbeddedTorEngine.connectToOnionOverSocks5(
+                peerOnion = peerOnion,
+                targetPort = 9443,
+                socksHost = "127.0.0.1",
+                socksPort = server.localPort,
+                connectTimeoutMs = 5_000
+            ).use { tunneled ->
+                tunneled.getOutputStream().write("PING".toByteArray(Charsets.UTF_8))
+                tunneled.getOutputStream().flush()
+                val pong = ByteArray(4)
+                java.io.DataInputStream(tunneled.getInputStream()).readFully(pong)
+                assertEquals("PONG", String(pong, Charsets.UTF_8))
+            }
+
+            try {
+                com.zerotrace.network.EmbeddedTorEngine.connectToOnionOverSocks5(
+                    peerOnion = peerOnion,
+                    targetPort = 9443,
+                    socksHost = "127.0.0.1",
+                    socksPort = server.localPort,
+                    connectTimeoutMs = 5_000
+                )
+                fail("Expected SOCKS5 REP=0x04 to throw IOException")
+            } catch (expected: java.io.IOException) {
+                assertTrue(expected.message!!.contains("0x04"))
+            }
+
+            serverThread.join(3_000)
+            serverErr.get()?.let { throw it }
+        } finally {
+            server.close()
+        }
+    }
 }
 
 

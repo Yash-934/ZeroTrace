@@ -100,6 +100,7 @@ fun ZeroTraceRootApp(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val connectivityState by viewModel.connectivityState.collectAsStateWithLifecycle()
     val torProgress by viewModel.torBootstrapProgress.collectAsStateWithLifecycle()
+    val torBootstrapSummary by viewModel.torBootstrapSummary.collectAsStateWithLifecycle()
     val transportBackend by viewModel.transportBackend.collectAsStateWithLifecycle()
     val localListenerPort by viewModel.localListenerPort.collectAsStateWithLifecycle()
     val transportError by viewModel.transportError.collectAsStateWithLifecycle()
@@ -180,6 +181,7 @@ fun ZeroTraceRootApp(
                                 identitySummary = uiState.identitySummary,
                                 connectivityState = connectivityState,
                                 torProgress = torProgress,
+                                torBootstrapSummary = torBootstrapSummary,
                                 transportBackend = transportBackend,
                                 verifiedContacts = uiState.verifiedContacts,
                                 pinnedOnions = uiState.pinnedOnions,

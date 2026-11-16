@@ -125,6 +125,9 @@ dependencies {
   implementation(libs.bouncycastle.pqc)
   // Local deterministic QR generation and CameraX luminance frame decoding
   implementation(libs.zxing.core)
+  // Embedded Tor C daemon + Android lifecycle service + control socket library
+  implementation(libs.tor.android)
+  implementation(libs.jtorctl)
 
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)

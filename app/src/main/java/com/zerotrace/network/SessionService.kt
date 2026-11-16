@@ -97,13 +97,17 @@ enum class ConnectivityState(val code: String, val labelEn: String, val labelHi:
 }
 
 enum class TorTransportBackend(val labelEn: String, val labelHi: String) {
+    EMBEDDED_TOR(
+        "Embedded Tor Network (Any Network / Mobile Data)",
+        "एम्बेडेड Tor नेटवर्क (अलग Wi-Fi / मोबाइल डेटा)"
+    ),
     SOCKS5_TOR_DAEMON(
-        "Tor Onion SOCKS5 Circuit (127.0.0.1:9050)",
-        "Tor अनियन SOCKS5 सर्किट (127.0.0.1:9050)"
+        "External Tor / Orbot SOCKS5 (127.0.0.1:9050)",
+        "एक्सटर्नल Tor / Orbot SOCKS5 (127.0.0.1:9050)"
     ),
     LOOPBACK_ONION_VERIFICATION(
-        "Local Loopback / Hotspot P2P Onion Circuit",
-        "लोकल लूपबैक / हॉटस्पॉट P2P अनियन सर्किट"
+        "Local Loopback / Same-Wi-Fi Hotspot P2P Circuit",
+        "लोकल लूपबैक / सेम-Wi-Fi हॉटस्पॉट P2P सर्किट"
     )
 }
 
@@ -365,9 +369,19 @@ object TorOnionTransportManager {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sweepMutex = Mutex()
+    private val bootstrapMutex = Mutex()
+
+    private val isAndroidDeviceRuntime: Boolean = try {
+        Build.VERSION.SDK_INT > 0 && !Build.FINGERPRINT.equals("robolectric", ignoreCase = true)
+    } catch (_: Throwable) {
+        false
+    }
 
     @Volatile
     private var appContextRef: Context? = null
+
+    @Volatile
+    private var activeBootstrapJob: CompletableDeferred<Boolean>? = null
 
     @Volatile
     private var localBootId: String = UUID.randomUUID().toString().replace("-", "")
@@ -378,7 +392,10 @@ object TorOnionTransportManager {
     private val _lastErrorDetail = MutableStateFlow<String?>(null)
     val lastErrorDetail: StateFlow<String?> = _lastErrorDetail.asStateFlow()
 
-    private val _transportBackend = MutableStateFlow(TorTransportBackend.LOOPBACK_ONION_VERIFICATION)
+    private val _transportBackend = MutableStateFlow(
+        if (isAndroidDeviceRuntime) TorTransportBackend.EMBEDDED_TOR
+        else TorTransportBackend.LOOPBACK_ONION_VERIFICATION
+    )
     val transportBackend: StateFlow<TorTransportBackend> = _transportBackend.asStateFlow()
 
     private val _localListenerPort = MutableStateFlow<Int?>(null)
@@ -386,6 +403,12 @@ object TorOnionTransportManager {
 
     private val _torBootstrapProgress = MutableStateFlow(0)
     val torBootstrapProgress: StateFlow<Int> = _torBootstrapProgress.asStateFlow()
+
+    private val _torBootstrapSummary = MutableStateFlow<String?>(null)
+    val torBootstrapSummary: StateFlow<String?> = _torBootstrapSummary.asStateFlow()
+
+    private val _activeTorSocksPort = MutableStateFlow<Int?>(null)
+    val activeTorSocksPort: StateFlow<Int?> = _activeTorSocksPort.asStateFlow()
 
     private val _connectedPeerOnions = MutableStateFlow<Set<String>>(emptySet())
     val connectedPeerOnions: StateFlow<Set<String>> = _connectedPeerOnions.asStateFlow()
@@ -420,12 +443,6 @@ object TorOnionTransportManager {
     private val connectingEndpoints = ConcurrentHashMap.newKeySet<String>()
     private val incomingMediaChunksByTransferId = ConcurrentHashMap<String, ConcurrentHashMap<Int, EncryptedFileChunk>>()
 
-    private val isAndroidDeviceRuntime: Boolean = try {
-        Build.VERSION.SDK_INT > 0 && !Build.FINGERPRINT.equals("robolectric", ignoreCase = true)
-    } catch (_: Throwable) {
-        false
-    }
-
     @Volatile
     private var loopbackPeerNode: LoopbackCryptographicPeerNode? = null
 
@@ -434,6 +451,11 @@ object TorOnionTransportManager {
     }
 
     fun configureTransportBackend(backend: TorTransportBackend, customSocksPort: Int = 9050) {
+        if (backend != TorTransportBackend.EMBEDDED_TOR && _transportBackend.value == TorTransportBackend.EMBEDDED_TOR) {
+            EmbeddedTorEngine.stopEmbeddedTor(appContextRef)
+            _activeTorSocksPort.value = null
+            _torBootstrapSummary.value = null
+        }
         _transportBackend.value = backend
         socksPort = customSocksPort.coerceIn(1024, 65535)
     }
@@ -470,65 +492,128 @@ object TorOnionTransportManager {
     }
 
     /**
-     * Bootstraps the Tor transport, starts the local `127.0.0.1` Onion Service listener,
-     * and starts the P2P Hotspot/LAN `.onion` Mesh Engine (NSD + `TCP :9443` + `UDP :19443`).
+     * Bootstraps the Tor transport (including Guardian Project `tor-android` embedded Tor daemon),
+     * starts the local `127.0.0.1` Onion Service listener, and starts the local P2P listener
+     * mapped into Tor's v3 `ADD_ONION` service + LAN fast-path mesh.
      */
     suspend fun bootstrapTorAndStartOnionService(): Boolean = withContext(Dispatchers.IO) {
-        try {
-            _lastErrorDetail.value = null
-            _connectivityState.value = ConnectivityState.INITIALIZING
-            _torBootstrapProgress.value = 15
-            delay(60)
-
-            _connectivityState.value = ConnectivityState.TOR_BOOTSTRAPPING
-            _torBootstrapProgress.value = 45
-
-            ensureLocalLoopbackListenerStarted()
-            ensureLoopbackVerificationPeerStarted()
-            if (isAndroidDeviceRuntime) {
-                ensureP2pOnionMeshEngineStarted()
+        activeBootstrapJob?.let { inFlight ->
+            if (inFlight.isActive) {
+                return@withContext inFlight.await()
             }
+        }
+        bootstrapMutex.withLock {
+            val jobDeferred = CompletableDeferred<Boolean>()
+            activeBootstrapJob = jobDeferred
+            try {
+                _lastErrorDetail.value = null
+                _connectivityState.value = ConnectivityState.INITIALIZING
+                _torBootstrapProgress.value = 10
+                _torBootstrapSummary.value = "Initializing local Onion listener…"
 
-            when (_transportBackend.value) {
-                TorTransportBackend.SOCKS5_TOR_DAEMON -> {
-                    verifyLoopbackBindAddressOrThrow(socksHost)
-                    val externalReachable = probeLocalTorSocksPort(socksHost, socksPort) ||
-                        (socksPort == 9050 && probeLocalTorSocksPort(socksHost, 9150).also { if (it) socksPort = 9150 })
+                ensureLocalLoopbackListenerStarted()
+                ensureLoopbackVerificationPeerStarted()
+                if (isAndroidDeviceRuntime) {
+                    appContextRef?.let { SessionService.startServiceIfPermitted(it) }
+                    ensureP2pOnionMeshEngineStarted()
+                }
 
-                    if (!externalReachable) {
-                        if (socksPort != 9050) {
-                            _torBootstrapProgress.value = 0
-                            _connectivityState.value = ConnectivityState.ERROR
-                            _lastErrorDetail.value =
-                                "FAIL-CLOSED: No Tor SOCKS5 daemon reachable at 127.0.0.1:$socksPort. Clearnet fallback is strictly prohibited."
-                            return@withContext false
+                when (_transportBackend.value) {
+                    TorTransportBackend.EMBEDDED_TOR -> {
+                        if (isAndroidDeviceRuntime) {
+                            val ctx = appContextRef
+                                ?: throw IllegalStateException("Android application context not initialized")
+                            _connectivityState.value = ConnectivityState.TOR_BOOTSTRAPPING
+                            val ready = EmbeddedTorEngine.startAndPublishOnionService(
+                                context = ctx,
+                                virtualOnionPort = DEFAULT_P2P_TCP_PORT,
+                                localListenPort = p2pMeshListeningPort,
+                                torAddOnionPrivateKeyParam = RustCoreBridge.exportTorAddOnionPrivateKeyBlob(),
+                                expectedOnionAddress = RustCoreBridge.getPublicIdentitySummary()?.onionAddress,
+                                onProgress = { pct, summary ->
+                                    _torBootstrapProgress.value = pct
+                                    _torBootstrapSummary.value = summary
+                                    _connectivityState.value = if (pct >= 95) {
+                                        ConnectivityState.ONION_SERVICE_STARTING
+                                    } else {
+                                        ConnectivityState.TOR_BOOTSTRAPPING
+                                    }
+                                }
+                            )
+                            socksPort = ready.socksPort
+                            _activeTorSocksPort.value = ready.socksPort
+                            _torBootstrapSummary.value =
+                                "Embedded Tor v3 ready (${ready.publishedOnionAddress.take(10)}…onion, SOCKS5 :${ready.socksPort})"
                         } else {
-                            ensureEmbeddedSocks5OnionRouterStarted()
+                            // JVM unit test / non-Android fallback: simulate clean local init only if not explicitly external
+                            _connectivityState.value = ConnectivityState.TOR_BOOTSTRAPPING
+                            _torBootstrapProgress.value = 60
+                            delay(20)
                         }
                     }
+
+                    TorTransportBackend.SOCKS5_TOR_DAEMON -> {
+                        _connectivityState.value = ConnectivityState.TOR_BOOTSTRAPPING
+                        _torBootstrapProgress.value = 45
+                        verifyLoopbackBindAddressOrThrow(socksHost)
+                        val externalReachable = probeLocalTorSocksPort(socksHost, socksPort) ||
+                            (socksPort == 9050 && probeLocalTorSocksPort(socksHost, 9150).also { if (it) socksPort = 9150 })
+
+                        if (!externalReachable) {
+                            if (socksPort != 9050) {
+                                _torBootstrapProgress.value = 0
+                                _torBootstrapSummary.value = null
+                                _activeTorSocksPort.value = null
+                                _connectivityState.value = ConnectivityState.ERROR
+                                val msg = "FAIL-CLOSED: No Tor SOCKS5 daemon reachable at 127.0.0.1:$socksPort. Clearnet fallback is strictly prohibited."
+                                _lastErrorDetail.value = msg
+                                jobDeferred.complete(false)
+                                return@withLock false
+                            } else {
+                                ensureEmbeddedSocks5OnionRouterStarted()
+                                _activeTorSocksPort.value = null
+                            }
+                        } else {
+                            _activeTorSocksPort.value = socksPort
+                            _torBootstrapSummary.value = "External Tor SOCKS5 ready (127.0.0.1:$socksPort)"
+                        }
+                    }
+
+                    TorTransportBackend.LOOPBACK_ONION_VERIFICATION -> {
+                        _connectivityState.value = ConnectivityState.TOR_BOOTSTRAPPING
+                        _torBootstrapProgress.value = 50
+                        _activeTorSocksPort.value = null
+                        _torBootstrapSummary.value = "Local Loopback / Same-Wi-Fi P2P circuit ready"
+                        delay(50)
+                    }
                 }
-                TorTransportBackend.LOOPBACK_ONION_VERIFICATION -> {
-                    delay(50)
+
+                _torBootstrapProgress.value = 90
+                _connectivityState.value = ConnectivityState.TOR_READY
+                delay(30)
+
+                _connectivityState.value = ConnectivityState.ONION_SERVICE_STARTING
+                _torBootstrapProgress.value = 100
+                _connectivityState.value = if (realPeerSessionHandles.isNotEmpty()) {
+                    ConnectivityState.E2EE_SESSION_READY
+                } else {
+                    ConnectivityState.ONION_SERVICE_READY
+                }
+                jobDeferred.complete(true)
+                true
+            } catch (e: Exception) {
+                _torBootstrapProgress.value = 0
+                _activeTorSocksPort.value = null
+                _torBootstrapSummary.value = e.message
+                _connectivityState.value = ConnectivityState.ERROR
+                _lastErrorDetail.value = "FAIL-CLOSED: ${e.message}"
+                jobDeferred.complete(false)
+                false
+            } finally {
+                if (activeBootstrapJob === jobDeferred) {
+                    activeBootstrapJob = null
                 }
             }
-
-            _torBootstrapProgress.value = 75
-            _connectivityState.value = ConnectivityState.TOR_READY
-            delay(40)
-
-            _connectivityState.value = ConnectivityState.ONION_SERVICE_STARTING
-            _torBootstrapProgress.value = 100
-            _connectivityState.value = if (realPeerSessionHandles.isNotEmpty()) {
-                ConnectivityState.E2EE_SESSION_READY
-            } else {
-                ConnectivityState.ONION_SERVICE_READY
-            }
-            true
-        } catch (e: Exception) {
-            _torBootstrapProgress.value = 0
-            _connectivityState.value = ConnectivityState.ERROR
-            _lastErrorDetail.value = "FAIL-CLOSED: ${e.message}"
-            false
         }
     }
 
@@ -1142,7 +1227,7 @@ object TorOnionTransportManager {
         try {
             socket.tcpNoDelay = true
             socket.keepAlive = true
-            socket.soTimeout = 10_000
+            socket.soTimeout = 20_000
             val inp = DataInputStream(BufferedInputStream(socket.getInputStream(), 32_768))
             val out = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 32_768))
 
@@ -1600,8 +1685,12 @@ object TorOnionTransportManager {
             val peerOnion = contact.onionAddress.lowercase()
             RustCoreBridge.validateOnionDestinationOrThrow(peerOnion)
 
-            if (_connectivityState.value == ConnectivityState.OFFLINE ||
-                _connectivityState.value == ConnectivityState.ERROR
+            val stateNow = _connectivityState.value
+            if (stateNow == ConnectivityState.OFFLINE ||
+                stateNow == ConnectivityState.ERROR ||
+                stateNow == ConnectivityState.INITIALIZING ||
+                stateNow == ConnectivityState.TOR_BOOTSTRAPPING ||
+                stateNow == ConnectivityState.ONION_SERVICE_STARTING
             ) {
                 val ok = bootstrapTorAndStartOnionService()
                 if (!ok) {
@@ -1611,7 +1700,7 @@ object TorOnionTransportManager {
                 }
             }
 
-            // 1. Real two-device P2P connection path on Android
+            // 1. Real two-device P2P connection path on Android (Cross-Network Tor .onion OR Same-Wi-Fi/Hotspot Mesh)
             if (isAndroidDeviceRuntime && !isLoopbackVerificationContact(contact)) {
                 val existingHandle = getActiveRealPeerSessionHandle(peerOnion)
                 if (existingHandle != null && isPeerConnectedOnMesh(peerOnion)) {
@@ -1623,21 +1712,54 @@ object TorOnionTransportManager {
                 _connectivityState.value = ConnectivityState.CONNECTING_TO_PEER
                 ensureP2pOnionMeshEngineStarted()
 
+                val activeSocksPort = when (_transportBackend.value) {
+                    TorTransportBackend.EMBEDDED_TOR -> EmbeddedTorEngine.getActiveSocksPort()
+                    TorTransportBackend.SOCKS5_TOR_DAEMON -> _activeTorSocksPort.value
+                    TorTransportBackend.LOOPBACK_ONION_VERIFICATION -> null
+                }
+
                 var channel = livePeerChannels[peerOnion]?.takeIf { it.isAlive() }
                 if (channel == null) {
                     broadcastUdpBeaconAndProbeGateways()
                     val sweepJob = scope.launch { sweepLocalSubnetsForPeers() }
-                    channel = withTimeoutOrNull(3500L) {
+                    var torDialError: String? = null
+                    val torDialJob = if (activeSocksPort != null && activeSocksPort > 0) {
+                        scope.launch {
+                            try {
+                                val torSock = EmbeddedTorEngine.connectToOnionOverSocks5(
+                                    peerOnion = peerOnion,
+                                    targetPort = DEFAULT_P2P_TCP_PORT,
+                                    socksHost = socksHost,
+                                    socksPort = activeSocksPort,
+                                    connectTimeoutMs = 45_000
+                                )
+                                handlePeerSocketConnection(torSock, isOutbound = true)
+                            } catch (t: Throwable) {
+                                torDialError = t.message
+                            }
+                        }
+                    } else null
+
+                    val waitBudgetMs = if (torDialJob != null) 48_000L else 4_500L
+                    channel = withTimeoutOrNull(waitBudgetMs) {
                         while (true) {
                             val ch = livePeerChannels[peerOnion]?.takeIf { it.isAlive() }
                             if (ch != null) return@withTimeoutOrNull ch
-                            delay(100L)
+                            if (torDialJob != null && torDialJob.isCompleted && sweepJob.isCompleted) {
+                                delay(250L)
+                                val chAfter = livePeerChannels[peerOnion]?.takeIf { it.isAlive() }
+                                if (chAfter != null) return@withTimeoutOrNull chAfter
+                                if (torDialError != null) break
+                            }
+                            delay(120L)
                         }
-                        @Suppress("UNREACHABLE_CODE")
                         null
                     }
+                    sweepJob.cancel()
                     if (channel != null) {
-                        sweepJob.cancel()
+                        torDialJob?.cancel()
+                    } else if (torDialError != null) {
+                        _lastErrorDetail.value = torDialError
                     }
                 }
 
@@ -1645,7 +1767,8 @@ object TorOnionTransportManager {
                     // Brief pause for deterministic initiator if we have the larger .onion address
                     val localOnion = RustCoreBridge.getPublicIdentitySummary()?.onionAddress?.lowercase().orEmpty()
                     if (getActiveRealPeerSessionHandle(peerOnion) == null && localOnion > peerOnion) {
-                        withTimeoutOrNull(900L) {
+                        val tieWaitMs = if (activeSocksPort != null) 2_500L else 900L
+                        withTimeoutOrNull(tieWaitMs) {
                             while (getActiveRealPeerSessionHandle(peerOnion) == null) {
                                 delay(80L)
                             }
@@ -1661,7 +1784,8 @@ object TorOnionTransportManager {
 
                     _connectivityState.value = ConnectivityState.AUTHENTICATING_PEER
                     val deferred = initiateHandshakeOverPeerChannel(channel)
-                    val establishedHandle = withTimeoutOrNull(5000L) {
+                    val handshakeTimeoutMs = if (activeSocksPort != null) 15_000L else 5_000L
+                    val establishedHandle = withTimeoutOrNull(handshakeTimeoutMs) {
                         deferred.await()
                     } ?: getActiveRealPeerSessionHandle(peerOnion)
 
@@ -1673,7 +1797,11 @@ object TorOnionTransportManager {
                 }
 
                 _connectivityState.value = ConnectivityState.ONION_SERVICE_READY
-                val waitMsg = "Waiting for ${contact.alias} (${peerOnion.take(10)}…onion) on Hotspot / Wi-Fi P2P circuit. Keep ZeroTrace open on both devices."
+                val waitMsg = if (activeSocksPort != null) {
+                    "Peer ${contact.alias} (${peerOnion.take(10)}…onion) unreachable over Tor right now. Ensure ZeroTrace is open on their phone & Tor shows 100%."
+                } else {
+                    "Waiting for ${contact.alias} (${peerOnion.take(10)}…onion) on Hotspot / Wi-Fi P2P circuit. Keep ZeroTrace open on both devices."
+                }
                 _lastErrorDetail.value = null
                 return@withContext Result.failure(IllegalStateException(waitMsg))
             }
@@ -1760,7 +1888,7 @@ object TorOnionTransportManager {
                 if (channel == null || !channel.isAlive()) {
                     return@withContext Result.failure(
                         IllegalStateException(
-                            "Peer device is not connected on Hotspot / Wi-Fi yet. Keep ZeroTrace open on both devices on the same Hotspot or Wi-Fi."
+                            "Peer circuit not connected yet. Ensure both phones show Tor / Onion Service Ready."
                         )
                     )
                 }
@@ -1836,7 +1964,7 @@ object TorOnionTransportManager {
     suspend fun awaitAndTakeMediaChunks(
         transferId: String,
         expectedChunks: Int,
-        timeoutMs: Long = 3500L
+        timeoutMs: Long = 25_000L
     ): List<EncryptedFileChunk>? {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
@@ -1942,6 +2070,7 @@ object TorOnionTransportManager {
         peerHelloByOnion.clear()
         refreshConnectedPeerState()
         stopNsdMesh()
+        EmbeddedTorEngine.stopEmbeddedTor(appContextRef)
         loopbackPeerNode?.stopAndWipe()
         loopbackPeerNode = null
         p2pDiscoveryJob?.cancel()
@@ -1968,6 +2097,8 @@ object TorOnionTransportManager {
         p2pUdpBeaconSocket = null
         embeddedSocksPort = null
         _localListenerPort.value = null
+        _activeTorSocksPort.value = null
+        _torBootstrapSummary.value = null
         _torBootstrapProgress.value = 0
         _lastErrorDetail.value = null
         _connectivityState.value = ConnectivityState.OFFLINE

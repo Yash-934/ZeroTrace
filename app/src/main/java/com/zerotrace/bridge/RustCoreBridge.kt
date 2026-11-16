@@ -1,6 +1,5 @@
 package com.zerotrace.bridge
 
-import android.util.Base64
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
@@ -315,7 +314,8 @@ object RustCoreBridge {
         val mlDsa87PkEncoded: ByteArray,
         val mlKem1024DkEncoded: ByteArray,
         val mlKem1024EkEncoded: ByteArray,
-        val onionServiceSeed: ByteArray
+        var onionServiceSeed: ByteArray,
+        var onionServicePub: ByteArray
     ) {
         fun zeroize() {
             Arrays.fill(ed25519Sk, 0.toByte())
@@ -434,7 +434,8 @@ object RustCoreBridge {
             mlDsa87PkEncoded = mldsaPub.encoded,
             mlKem1024DkEncoded = mlkemPriv.encoded,
             mlKem1024EkEncoded = mlkemPub.encoded,
-            onionServiceSeed = onionPub
+            onionServiceSeed = onionSeed,
+            onionServicePub = onionPub
         )
         activeIdentity = holder
         val serialized = serializeIdentityHolder(holder)
@@ -453,6 +454,44 @@ object RustCoreBridge {
         }
     }
 
+    /**
+     * Migrates legacy pre-Tor `ZTID` identities (which only stored the public onion key) to `ZTIE`
+     * by generating a real 32-byte Ed25519 seed so the embedded Tor daemon can publish the exact
+     * matching `.onion` hidden service. Returns updated summary + serialized bundle if migrated.
+     */
+    @Synchronized
+    fun migrateLegacyOnionSeedIfNeeded(): Pair<PublicIdentitySummary, ByteArray>? {
+        val holder = activeIdentity ?: return null
+        if (holder.onionServiceSeed.size == 32) return null
+        val newSeed = ByteArray(32).also { csprng.nextBytes(it) }
+        val newPub = Ed25519PrivateKeyParameters(newSeed, 0).generatePublicKey().encoded
+        Arrays.fill(holder.onionServiceSeed, 0.toByte())
+        holder.onionServiceSeed = newSeed
+        holder.onionServicePub = newPub
+        return Pair(buildPublicSummary(holder), serializeIdentityHolder(holder))
+    }
+
+    /**
+     * Expands a 32-byte Ed25519 seed per RFC 8032 + Tor Control Spec (`ADD_ONION`)
+     * into the 64-byte clamped `(a || RH)` Base64 blob `"ED25519-V3:<base64>"`.
+     */
+    fun buildTorAddOnionPrivateKeyParam(seed32: ByteArray): String {
+        require(seed32.size == 32) { "Tor v3 onion seed must be 32 bytes" }
+        val expanded = MessageDigest.getInstance("SHA-512").digest(seed32)
+        expanded[0] = (expanded[0].toInt() and 248).toByte()
+        expanded[31] = ((expanded[31].toInt() and 63) or 64).toByte()
+        val b64 = java.util.Base64.getEncoder().encodeToString(expanded)
+        Arrays.fill(expanded, 0.toByte())
+        return "ED25519-V3:$b64"
+    }
+
+    @Synchronized
+    fun exportTorAddOnionPrivateKeyBlob(): String? {
+        val holder = activeIdentity ?: return null
+        if (holder.onionServiceSeed.size != 32) return null
+        return buildTorAddOnionPrivateKeyParam(holder.onionServiceSeed)
+    }
+
     @Synchronized
     fun getPublicIdentitySummary(): PublicIdentitySummary? {
         val holder = activeIdentity ?: return null
@@ -462,7 +501,7 @@ object RustCoreBridge {
     private fun buildPublicSummary(holder: PrivateIdentityHolder): PublicIdentitySummary {
         val classicalFp = computeClassicalFingerprint(holder.ed25519Pk, holder.x25519Pk)
         val pqFp = computePqFingerprint(holder.mlDsa87PkEncoded, holder.mlKem1024EkEncoded)
-        val onionAddress = deriveV3OnionAddress(holder.onionServiceSeed)
+        val onionAddress = deriveV3OnionAddress(holder.onionServicePub)
         return PublicIdentitySummary(
             onionAddress = onionAddress,
             classicalFingerprintHex = classicalFp.toHex(),
@@ -1503,7 +1542,7 @@ object RustCoreBridge {
     private fun serializeIdentityHolder(h: PrivateIdentityHolder): ByteArray {
         val baos = ByteArrayOutputStream()
         DataOutputStream(baos).use { out ->
-            out.writeInt(0x5A544944) // "ZTID"
+            out.writeInt(0x5A544945) // "ZTIE" v2 with private Tor seed + pubkey
             writeByteArray(out, h.ed25519Sk)
             writeByteArray(out, h.ed25519Pk)
             writeByteArray(out, h.x25519Sk)
@@ -1513,6 +1552,7 @@ object RustCoreBridge {
             writeByteArray(out, h.mlKem1024DkEncoded)
             writeByteArray(out, h.mlKem1024EkEncoded)
             writeByteArray(out, h.onionServiceSeed)
+            writeByteArray(out, h.onionServicePub)
         }
         return baos.toByteArray()
     }
@@ -1520,18 +1560,46 @@ object RustCoreBridge {
     private fun deserializeIdentityHolder(bytes: ByteArray): PrivateIdentityHolder {
         DataInputStream(ByteArrayInputStream(bytes)).use { inp ->
             val magic = inp.readInt()
-            require(magic == 0x5A544944) { "Invalid wrapped identity header" }
-            return PrivateIdentityHolder(
-                ed25519Sk = readByteArray(inp),
-                ed25519Pk = readByteArray(inp),
-                x25519Sk = readByteArray(inp),
-                x25519Pk = readByteArray(inp),
-                mlDsa87SkEncoded = readByteArray(inp),
-                mlDsa87PkEncoded = readByteArray(inp),
-                mlKem1024DkEncoded = readByteArray(inp),
-                mlKem1024EkEncoded = readByteArray(inp),
-                onionServiceSeed = readByteArray(inp)
-            )
+            require(magic == 0x5A544944 || magic == 0x5A544945) { "Invalid wrapped identity header" }
+            val edSk = readByteArray(inp)
+            val edPk = readByteArray(inp)
+            val xSk = readByteArray(inp)
+            val xPk = readByteArray(inp)
+            val dsaSk = readByteArray(inp)
+            val dsaPk = readByteArray(inp)
+            val kemDk = readByteArray(inp)
+            val kemEk = readByteArray(inp)
+            return if (magic == 0x5A544945) {
+                val onionSeed = readByteArray(inp)
+                val onionPub = readByteArray(inp)
+                PrivateIdentityHolder(
+                    ed25519Sk = edSk,
+                    ed25519Pk = edPk,
+                    x25519Sk = xSk,
+                    x25519Pk = xPk,
+                    mlDsa87SkEncoded = dsaSk,
+                    mlDsa87PkEncoded = dsaPk,
+                    mlKem1024DkEncoded = kemDk,
+                    mlKem1024EkEncoded = kemEk,
+                    onionServiceSeed = onionSeed,
+                    onionServicePub = onionPub
+                )
+            } else {
+                // Legacy ZTID stored only the public key in the onionServiceSeed slot
+                val legacyPub = readByteArray(inp)
+                PrivateIdentityHolder(
+                    ed25519Sk = edSk,
+                    ed25519Pk = edPk,
+                    x25519Sk = xSk,
+                    x25519Pk = xPk,
+                    mlDsa87SkEncoded = dsaSk,
+                    mlDsa87PkEncoded = dsaPk,
+                    mlKem1024DkEncoded = kemDk,
+                    mlKem1024EkEncoded = kemEk,
+                    onionServiceSeed = ByteArray(0),
+                    onionServicePub = legacyPub
+                )
+            }
         }
     }
 

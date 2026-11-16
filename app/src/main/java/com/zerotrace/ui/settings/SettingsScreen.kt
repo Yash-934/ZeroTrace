@@ -417,7 +417,7 @@ fun ZeroTraceSettingsScreen(
             // 6. Tor Network Transport Configuration
             SettingsSectionCard(title = "TOR ONION TRANSPORT CONFIGURATION (FAIL-CLOSED)") {
                 Text(
-                    text = "Direct clearnet IP fallback is strictly disabled. Choose External Tor SOCKS5 (127.0.0.1:9050) or Local Loopback Verification Circuit (127.0.0.1).",
+                    text = "Direct clearnet IP fallback is strictly disabled. Embedded Tor connects peers across different mobile data/Wi-Fi networks without Orbot or same-Wi-Fi; external Tor SOCKS5 and local Wi-Fi/Hotspot P2P remain optional backends.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

@@ -177,6 +177,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
 
     val connectivityState: StateFlow<ConnectivityState> = TorOnionTransportManager.connectivityState
     val torBootstrapProgress: StateFlow<Int> = TorOnionTransportManager.torBootstrapProgress
+    val torBootstrapSummary: StateFlow<String?> = TorOnionTransportManager.torBootstrapSummary
     val transportBackend: StateFlow<TorTransportBackend> = TorOnionTransportManager.transportBackend
     val localListenerPort: StateFlow<Int?> = TorOnionTransportManager.localListenerPort
     val transportError: StateFlow<String?> = TorOnionTransportManager.lastErrorDetail
@@ -363,8 +364,16 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             }
 
             if (storedIdentityBytes != null) {
-                val summary = RustCoreBridge.restoreWrappedIdentity(storedIdentityBytes)
-                TorOnionTransportManager.bootstrapTorAndStartOnionService()
+                var summary = RustCoreBridge.restoreWrappedIdentity(storedIdentityBytes)
+                RustCoreBridge.migrateLegacyOnionSeedIfNeeded()?.let { (migratedSummary, migratedBundle) ->
+                    try {
+                        keystoreManager.saveWrappedIdentity(migratedBundle)
+                    } finally {
+                        Arrays.fill(migratedBundle, 0.toByte())
+                    }
+                    summary = migratedSummary
+                }
+
                 val loadedContacts = loadEncryptedContactsFromDisk()
                 val contacts = loadedContacts.map { TorOnionTransportManager.normalizeLoopbackContactIfNeeded(it) }
                 if (contacts != loadedContacts) {
@@ -382,8 +391,12 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                         backupAuditStatus = backupAudit
                     )
                 }
-                if (contacts.isNotEmpty()) {
-                    establishWarmSessionInBackground(contacts.first())
+                refreshMyPairingQr()
+                viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    val torReady = TorOnionTransportManager.bootstrapTorAndStartOnionService()
+                    if (torReady && contacts.isNotEmpty()) {
+                        establishWarmSessionInBackground(contacts.first())
+                    }
                 }
             } else {
                 _uiState.update {
@@ -552,7 +565,9 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                         )
                     )
                 }
-                TorOnionTransportManager.bootstrapTorAndStartOnionService()
+                viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    TorOnionTransportManager.bootstrapTorAndStartOnionService()
+                }
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
@@ -974,7 +989,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     } else {
                         _uiState.update {
                             it.copy(
-                                statusBannerMessage = err.message ?: "Waiting for peer on Hotspot/Wi-Fi P2P circuit…",
+                                statusBannerMessage = err.message ?: "Waiting for peer on Tor .onion / P2P circuit…",
                                 errorBannerMessage = null
                             )
                         }
@@ -1015,7 +1030,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     _uiState.update {
                         it.copy(
                             errorBannerMessage = connectRes.exceptionOrNull()?.message
-                                ?: "Peer device is not reachable yet on Hotspot / Wi-Fi P2P circuit."
+                                ?: "Peer device is not reachable yet on Tor .onion / P2P circuit."
                         )
                     }
                     return@launch
@@ -1694,7 +1709,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         if (!isLoopback && !TorOnionTransportManager.isPeerConnectedOnMesh(contact.onionAddress)) {
             _uiState.update {
                 it.copy(
-                    errorBannerMessage = "Peer ${contact.alias} is not currently connected on Hotspot / Wi-Fi P2P circuit. Connect first before calling."
+                    errorBannerMessage = "Peer ${contact.alias} is not currently connected on Tor / P2P circuit. Connect first before calling."
                 )
             }
             return

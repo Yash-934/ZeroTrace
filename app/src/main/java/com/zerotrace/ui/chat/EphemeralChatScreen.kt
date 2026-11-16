@@ -360,7 +360,7 @@ fun EphemeralChatScreen(
                                     isSessionLive ->
                                         "P2P E2EE Live • Epoch ${ratchetMetrics?.ratchetEpoch ?: 1} • Braids ${ratchetMetrics?.pqBraidStepsCompleted ?: 0}"
                                     else ->
-                                        "Connecting Hotspot/Wi-Fi P2P… (Tap Reconnect)"
+                                        "Connecting Tor .onion / P2P… (Tap Reconnect)"
                                 },
                                 style = MonospaceStyle.copy(fontSize = 10.sp),
                                 color = if (isSessionLive) EmeraldPrimary else AmberWarning,

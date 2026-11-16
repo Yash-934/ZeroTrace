@@ -109,6 +109,7 @@ fun ZeroTraceHomeScreen(
     identitySummary: PublicIdentitySummary?,
     connectivityState: ConnectivityState,
     torProgress: Int,
+    torBootstrapSummary: String? = null,
     transportBackend: TorTransportBackend,
     verifiedContacts: List<VerifiedContactRecord>,
     pinnedOnions: Set<String>,
@@ -338,6 +339,7 @@ fun ZeroTraceHomeScreen(
                         language = language,
                         state = connectivityState,
                         progress = torProgress,
+                        bootstrapSummary = torBootstrapSummary,
                         backend = transportBackend,
                         onionAddress = identitySummary?.onionAddress,
                         onMyQrClick = { onNavigate(ZeroTraceScreen.MY_IDENTITY) },
@@ -458,6 +460,7 @@ private fun TorConnectivityStrip(
     language: AppLanguage,
     state: ConnectivityState,
     progress: Int,
+    bootstrapSummary: String?,
     backend: TorTransportBackend,
     onionAddress: String?,
     onMyQrClick: () -> Unit,
@@ -504,13 +507,27 @@ private fun TorConnectivityStrip(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Column {
+                        val headerText = if (progress in 1..99) {
+                            "${if (isHi) state.labelHi else state.labelEn} ($progress%)"
+                        } else {
+                            if (isHi) state.labelHi else state.labelEn
+                        }
                         Text(
-                            text = if (isHi) state.labelHi else state.labelEn,
+                            text = headerText,
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.onSurface
                         )
+                        val detailLine = when {
+                            !bootstrapSummary.isNullOrBlank() &&
+                                (state == ConnectivityState.INITIALIZING ||
+                                    state == ConnectivityState.TOR_BOOTSTRAPPING ||
+                                    state == ConnectivityState.ONION_SERVICE_STARTING) ->
+                                bootstrapSummary
+                            onionAddress != null -> onionAddress
+                            else -> if (isHi) backend.labelHi else backend.labelEn
+                        }
                         Text(
-                            text = onionAddress ?: (if (isHi) backend.labelHi else backend.labelEn),
+                            text = detailLine,
                             style = MonospaceStyle.copy(fontSize = 10.sp),
                             color = CyanAccent,
                             maxLines = 1,
