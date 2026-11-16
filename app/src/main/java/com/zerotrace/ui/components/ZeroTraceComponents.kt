@@ -34,6 +34,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AudioFile
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.CameraAlt
@@ -105,6 +106,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -503,6 +505,7 @@ fun ContactAvatar(
     hasActiveStatusRing: Boolean = false,
     statusSegmentCount: Int = 0,
     unseenStatusSegmentCount: Int = 0,
+    avatarBytes: ByteArray? = null,
     size: Dp = 50.dp,
     modifier: Modifier = Modifier
 ) {
@@ -568,6 +571,18 @@ fun ContactAvatar(
             }
         }
 
+        val decodedAvatar = remember(avatarBytes?.size, avatarBytes?.contentHashCode()) {
+            if (avatarBytes != null && avatarBytes.isNotEmpty()) {
+                try {
+                    BitmapFactory.decodeByteArray(avatarBytes, 0, avatarBytes.size)?.asImageBitmap()
+                } catch (_: Throwable) {
+                    null
+                }
+            } else {
+                null
+            }
+        }
+
         Box(
             modifier = Modifier
                 .size(innerSize)
@@ -587,11 +602,20 @@ fun ContactAvatar(
                 ),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = initials,
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                color = baseColor
-            )
+            if (decodedAvatar != null) {
+                Image(
+                    bitmap = decodedAvatar,
+                    contentDescription = "$alias profile picture",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.matchParentSize()
+                )
+            } else {
+                Text(
+                    text = initials,
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = baseColor
+                )
+            }
         }
 
         if (isOnlineOrSessionActive) {
@@ -666,6 +690,7 @@ fun ChatListItem(
                 onionAddress = contact.onionAddress,
                 isVerified = !contact.identityChangedWarning,
                 isOnlineOrSessionActive = isSessionLive,
+                avatarBytes = contact.avatarBytes,
                 modifier = Modifier.clickable { onProfileClick() }
             )
             Spacer(modifier = Modifier.width(12.dp))
@@ -833,6 +858,7 @@ fun MessageBubble(
     onReplyClick: (RichConversationMessage) -> Unit,
     onReactClick: (RichConversationMessage, String) -> Unit,
     onDeleteFromRamClick: (RichConversationMessage) -> Unit,
+    onDeleteForEveryoneClick: ((RichConversationMessage) -> Unit)? = null,
     onInspectInfoClick: (RichConversationMessage) -> Unit,
     onAcceptFileTransfer: ((String) -> Unit)? = null,
     onRejectFileTransfer: ((String) -> Unit)? = null,
@@ -842,7 +868,59 @@ fun MessageBubble(
     onVoicePlayToggle: ((RichConversationMessage) -> Unit)? = null
 ) {
     var actionMenuExpanded by remember { mutableStateOf(false) }
+    var showDeleteDialog by remember { mutableStateOf(false) }
     val timeFormatter = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+
+    if (showDeleteDialog) {
+        val canDeleteForEveryone = message.isOutgoing && !message.isDeletedPlaceholder && onDeleteForEveryoneClick != null
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showDeleteDialog = false },
+            title = {
+                Text(
+                    text = "Delete message?",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                )
+            },
+            text = {
+                Text(
+                    text = if (canDeleteForEveryone) {
+                        "Delete this message only on your device or for everyone in this encrypted chat?"
+                    } else {
+                        "Delete this message from your device?"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            },
+            confirmButton = {
+                Column(horizontalAlignment = Alignment.End) {
+                    if (canDeleteForEveryone) {
+                        TextButton(
+                            onClick = {
+                                showDeleteDialog = false
+                                onDeleteForEveryoneClick?.invoke(message)
+                            },
+                            modifier = Modifier.testTag("dialog_delete_for_everyone_btn")
+                        ) {
+                            Text("Delete for everyone", color = ZeroTraceRed, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    TextButton(
+                        onClick = {
+                            showDeleteDialog = false
+                            onDeleteFromRamClick(message)
+                        },
+                        modifier = Modifier.testTag("dialog_delete_for_me_btn")
+                    ) {
+                        Text("Delete for me", color = ZeroTraceRed, fontWeight = FontWeight.SemiBold)
+                    }
+                    TextButton(onClick = { showDeleteDialog = false }) {
+                        Text("Cancel")
+                    }
+                }
+            }
+        )
+    }
 
     val bubbleBg = if (message.isOutgoing) {
         ZeroTracePalette.outgoingBubble()
@@ -881,7 +959,8 @@ fun MessageBubble(
                     .widthIn(min = 120.dp, max = 320.dp)
                     .combinedClickable(
                         onClick = {
-                            if (message.payloadKind in setOf(
+                            if (!message.isDeletedPlaceholder &&
+                                message.payloadKind in setOf(
                                     MessagePayloadKind.IMAGE,
                                     MessagePayloadKind.VIDEO,
                                     MessagePayloadKind.DOCUMENT,
@@ -899,7 +978,7 @@ fun MessageBubble(
             ) {
                 Column(modifier = Modifier.padding(11.dp)) {
                     // Reply Preview Banner if replying to an earlier message
-                    if (!message.replyToPreview.isNullOrBlank()) {
+                    if (!message.isDeletedPlaceholder && !message.replyToPreview.isNullOrBlank()) {
                         Surface(
                             color = innerSurfaceColor,
                             shape = RoundedCornerShape(8.dp),
@@ -941,31 +1020,37 @@ fun MessageBubble(
                     }
 
                     // Render Media / File Transfer / Voice Note / Contact Card if present
-                    when (message.payloadKind) {
-                        MessagePayloadKind.IMAGE,
-                        MessagePayloadKind.VIDEO,
-                        MessagePayloadKind.DOCUMENT,
-                        MessagePayloadKind.AUDIO_FILE -> {
-                            val transfer = message.fileTransfer
-                            Surface(
-                                color = innerSurfaceColor,
-                                shape = RoundedCornerShape(10.dp),
-                                border = BorderStroke(1.dp, tealTint.copy(alpha = 0.28f)),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(bottom = 6.dp)
-                            ) {
-                                Column(modifier = Modifier.padding(10.dp)) {
-                                    val decryptedBytes = transfer?.decryptedInMemoryBytes
-                                    val isUploading = transfer != null && (
-                                        transfer.state == TransferLifecycleState.ENCRYPTING_AND_CHUNKING ||
-                                            transfer.state == TransferLifecycleState.TRANSMITTING_OVER_TOR ||
-                                            transfer.state == TransferLifecycleState.VERIFYING_INTEGRITY
-                                        )
-                                    val uploadProgress = if (transfer != null && transfer.manifest.totalChunks > 0) {
-                                        (transfer.chunksProcessed.toFloat() / transfer.manifest.totalChunks.toFloat()).coerceIn(0f, 1f)
-                                    } else 0f
-                                    val uploadPercent = (uploadProgress * 100f).toInt().coerceIn(0, 100)
+                    if (!message.isDeletedPlaceholder) {
+                        when (message.payloadKind) {
+                            MessagePayloadKind.IMAGE,
+                            MessagePayloadKind.VIDEO,
+                            MessagePayloadKind.DOCUMENT,
+                            MessagePayloadKind.AUDIO_FILE -> {
+                                val transfer = message.fileTransfer
+                                Surface(
+                                    color = innerSurfaceColor,
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = BorderStroke(1.dp, tealTint.copy(alpha = 0.28f)),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(bottom = 6.dp)
+                                ) {
+                                    Column(modifier = Modifier.padding(10.dp)) {
+                                        val decryptedBytes = transfer?.decryptedInMemoryBytes
+                                        val isUploading = transfer != null && (
+                                            transfer.state == TransferLifecycleState.ENCRYPTING_AND_CHUNKING ||
+                                                transfer.state == TransferLifecycleState.TRANSMITTING_OVER_TOR ||
+                                                transfer.state == TransferLifecycleState.VERIFYING_INTEGRITY
+                                            )
+                                        val uploadProgress = transfer?.effectiveFraction() ?: 0f
+                                        val uploadPercent = (uploadProgress * 100f).toInt().coerceIn(0, 100)
+                                        val totalKb = ((transfer?.manifest?.totalSizeBytes ?: 0) / 1024).coerceAtLeast(1)
+                                        val doneKb = (
+                                            (
+                                                (transfer?.bytesTransferred ?: 0L).takeIf { it > 0L }
+                                                    ?: ((totalKb * 1024L) * uploadProgress).toLong()
+                                                ) / 1024L
+                                            ).toInt().coerceIn(0, totalKb)
 
                                     val imageBitmap = if (message.payloadKind == MessagePayloadKind.IMAGE && decryptedBytes != null) {
                                         remember(message.id, decryptedBytes.size) {
@@ -1121,12 +1206,33 @@ fun MessageBubble(
                                                 MessagePayloadKind.AUDIO_FILE -> Icons.Default.AudioFile
                                                 else -> Icons.Default.Description
                                             }
-                                            Icon(
-                                                imageVector = icon,
-                                                contentDescription = message.payloadKind.name,
-                                                tint = tealTint,
-                                                modifier = Modifier.size(24.dp)
-                                            )
+                                            if (isUploading) {
+                                                Box(
+                                                    modifier = Modifier.size(36.dp),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    CircularProgressIndicator(
+                                                        progress = { uploadProgress.coerceAtLeast(0.06f) },
+                                                        color = emeraldTint,
+                                                        trackColor = emeraldTint.copy(alpha = 0.2f),
+                                                        strokeWidth = 2.8.dp,
+                                                        modifier = Modifier.size(36.dp)
+                                                    )
+                                                    Icon(
+                                                        imageVector = icon,
+                                                        contentDescription = message.payloadKind.name,
+                                                        tint = emeraldTint,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                }
+                                            } else {
+                                                Icon(
+                                                    imageVector = icon,
+                                                    contentDescription = message.payloadKind.name,
+                                                    tint = tealTint,
+                                                    modifier = Modifier.size(24.dp)
+                                                )
+                                            }
                                         }
                                         Spacer(modifier = Modifier.width(8.dp))
                                         Column(modifier = Modifier.weight(1f)) {
@@ -1186,25 +1292,43 @@ fun MessageBubble(
                                             TransferLifecycleState.TRANSMITTING_OVER_TOR,
                                             TransferLifecycleState.VERIFYING_INTEGRITY -> {
                                                 val stateLabel = when (transfer.state) {
-                                                    TransferLifecycleState.ENCRYPTING_AND_CHUNKING -> "Encrypting media…"
+                                                    TransferLifecycleState.ENCRYPTING_AND_CHUNKING ->
+                                                        "Encrypting $uploadPercent% (${transfer.chunksProcessed}/${transfer.manifest.totalChunks})"
                                                     TransferLifecycleState.TRANSMITTING_OVER_TOR ->
                                                         "Uploading $uploadPercent% (${transfer.chunksProcessed}/${transfer.manifest.totalChunks})"
-                                                    TransferLifecycleState.VERIFYING_INTEGRITY -> "Verifying integrity…"
+                                                    TransferLifecycleState.VERIFYING_INTEGRITY ->
+                                                        "Verifying integrity…"
                                                     else -> transfer.state.name
                                                 }
                                                 LinearProgressIndicator(
                                                     progress = { uploadProgress.coerceAtLeast(0.05f) },
                                                     modifier = Modifier
                                                         .fillMaxWidth()
+                                                        .height(6.dp)
                                                         .clip(RoundedCornerShape(3.dp)),
-                                                    color = emeraldTint
+                                                    color = emeraldTint,
+                                                    trackColor = emeraldTint.copy(alpha = 0.22f)
                                                 )
-                                                Spacer(modifier = Modifier.height(3.dp))
-                                                Text(
-                                                    text = stateLabel,
-                                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp),
-                                                    color = tealTint
-                                                )
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Text(
+                                                        text = stateLabel,
+                                                        style = MaterialTheme.typography.labelSmall.copy(
+                                                            fontSize = 10.5.sp,
+                                                            fontWeight = FontWeight.SemiBold
+                                                        ),
+                                                        color = tealTint
+                                                    )
+                                                    Text(
+                                                        text = "$doneKb / $totalKb KB",
+                                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                }
                                             }
 
                                             TransferLifecycleState.VERIFIED_READY_IN_RAM -> {
@@ -1368,17 +1492,40 @@ fun MessageBubble(
                         }
 
                         MessagePayloadKind.TEXT -> Unit
+                        }
                     }
 
-                    Text(
-                        text = message.bodyText,
-                        style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp),
-                        color = if (message.isOutgoing && ZeroTracePalette.isLight()) {
-                            ZeroTracePalette.mintContent()
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
+                    if (message.isDeletedPlaceholder) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Block,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Text(
+                                text = message.bodyText,
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    fontSize = 14.5.sp,
+                                    fontStyle = FontStyle.Italic
+                                ),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
-                    )
+                    } else {
+                        Text(
+                            text = message.bodyText,
+                            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp),
+                            color = if (message.isOutgoing && ZeroTracePalette.isLight()) {
+                                ZeroTracePalette.mintContent()
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            }
+                        )
+                    }
 
                     Spacer(modifier = Modifier.height(3.dp))
 
@@ -1457,50 +1604,52 @@ fun MessageBubble(
                 expanded = actionMenuExpanded,
                 onDismissRequest = { actionMenuExpanded = false }
             ) {
-                DropdownMenuItem(
-                    text = { Text("Reply") },
-                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.Reply, contentDescription = null) },
-                    onClick = {
-                        actionMenuExpanded = false
-                        onReplyClick(message)
-                    }
-                )
-                if (message.fileTransfer?.decryptedInMemoryBytes != null) {
-                    if (onMediaPreviewClick != null) {
-                        DropdownMenuItem(
-                            text = { Text("Open / Preview Attachment") },
-                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null) },
-                            onClick = {
-                                actionMenuExpanded = false
-                                onMediaPreviewClick(message)
-                            }
-                        )
-                    }
-                    if (onSaveMediaClick != null) {
-                        DropdownMenuItem(
-                            text = { Text("Save to Gallery / Downloads") },
-                            leadingIcon = { Icon(Icons.Default.Download, contentDescription = null, tint = emeraldTint) },
-                            onClick = {
-                                actionMenuExpanded = false
-                                onSaveMediaClick(message)
-                            }
-                        )
-                    }
-                }
-                DropdownMenuItem(
-                    text = { Text("React 🔒 / ⚡ / ✅") },
-                    leadingIcon = { Icon(Icons.Default.EmojiEmotions, contentDescription = null) },
-                    onClick = {
-                        actionMenuExpanded = false
-                        val nextReaction = when (message.reactionEmoji) {
-                            "🔒" -> "⚡"
-                            "⚡" -> "✅"
-                            "✅" -> null
-                            else -> "🔒"
+                if (!message.isDeletedPlaceholder) {
+                    DropdownMenuItem(
+                        text = { Text("Reply") },
+                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.Reply, contentDescription = null) },
+                        onClick = {
+                            actionMenuExpanded = false
+                            onReplyClick(message)
                         }
-                        onReactClick(message, nextReaction ?: "")
+                    )
+                    if (message.fileTransfer?.decryptedInMemoryBytes != null) {
+                        if (onMediaPreviewClick != null) {
+                            DropdownMenuItem(
+                                text = { Text("Open / Preview Attachment") },
+                                leadingIcon = { Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null) },
+                                onClick = {
+                                    actionMenuExpanded = false
+                                    onMediaPreviewClick(message)
+                                }
+                            )
+                        }
+                        if (onSaveMediaClick != null) {
+                            DropdownMenuItem(
+                                text = { Text("Save to Gallery / Downloads") },
+                                leadingIcon = { Icon(Icons.Default.Download, contentDescription = null, tint = emeraldTint) },
+                                onClick = {
+                                    actionMenuExpanded = false
+                                    onSaveMediaClick(message)
+                                }
+                            )
+                        }
                     }
-                )
+                    DropdownMenuItem(
+                        text = { Text("React 🔒 / ⚡ / ✅") },
+                        leadingIcon = { Icon(Icons.Default.EmojiEmotions, contentDescription = null) },
+                        onClick = {
+                            actionMenuExpanded = false
+                            val nextReaction = when (message.reactionEmoji) {
+                                "🔒" -> "⚡"
+                                "⚡" -> "✅"
+                                "✅" -> null
+                                else -> "🔒"
+                            }
+                            onReactClick(message, nextReaction ?: "")
+                        }
+                    )
+                }
                 DropdownMenuItem(
                     text = { Text("Cryptographic Message Info") },
                     leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
@@ -1510,11 +1659,20 @@ fun MessageBubble(
                     }
                 )
                 DropdownMenuItem(
-                    text = { Text("Delete & Zeroize from RAM", color = ZeroTraceRed) },
+                    text = {
+                        Text(
+                            text = if (message.isDeletedPlaceholder) "Delete for me" else "Delete…",
+                            color = ZeroTraceRed
+                        )
+                    },
                     leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = ZeroTraceRed) },
                     onClick = {
                         actionMenuExpanded = false
-                        onDeleteFromRamClick(message)
+                        if (message.isDeletedPlaceholder) {
+                            onDeleteFromRamClick(message)
+                        } else {
+                            showDeleteDialog = true
+                        }
                     }
                 )
             }

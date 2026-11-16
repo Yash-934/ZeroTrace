@@ -70,8 +70,15 @@ data class EncryptedTransferProgress(
     val chunksProcessed: Int,
     val bytesTransferred: Long,
     val decryptedInMemoryBytes: ByteArray? = null,
-    val failureReason: String? = null
+    val failureReason: String? = null,
+    val uploadProgressFraction: Float? = null
 ) {
+    fun effectiveFraction(): Float {
+        uploadProgressFraction?.let { return it.coerceIn(0f, 1f) }
+        val total = manifest.totalChunks.coerceAtLeast(1)
+        return (chunksProcessed.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+    }
+
     fun wipeZeroize() {
         decryptedInMemoryBytes?.let { Arrays.fill(it, 0.toByte()) }
     }
@@ -102,7 +109,8 @@ data class RichConversationMessage(
     val voiceDurationSeconds: Int? = null,
     val deliveryState: MessageDeliveryState = MessageDeliveryState.SENT,
     val wireSessionIdHex: String? = null,
-    val wireMsgNum: Long? = null
+    val wireMsgNum: Long? = null,
+    val isDeletedPlaceholder: Boolean = false
 ) {
     fun wipeFromRam() {
         fileTransfer?.wipeZeroize()
@@ -142,6 +150,16 @@ object E2eeChatEnvelope {
         data class Reaction(
             val targetMsgId: String,
             val emoji: String
+        ) : Decoded
+
+        data class Delete(
+            val targetMsgId: String
+        ) : Decoded
+
+        data class Profile(
+            val displayName: String,
+            val bio: String,
+            val avatarBytes: ByteArray?
         ) : Decoded
     }
 
@@ -213,6 +231,29 @@ object E2eeChatEnvelope {
         ).joinToString("|")
     }
 
+    fun encodeDelete(targetMsgId: String): String {
+        return listOf(
+            "ZT2ENV1",
+            "DELETE",
+            encStr(targetMsgId)
+        ).joinToString("|")
+    }
+
+    fun encodeProfile(displayName: String, bio: String, avatarBytes: ByteArray?): String {
+        val avatarB64 = if (avatarBytes != null && avatarBytes.isNotEmpty() && avatarBytes.size <= 32_768) {
+            b64Enc.encodeToString(avatarBytes)
+        } else {
+            ""
+        }
+        return listOf(
+            "ZT2ENV1",
+            "PROFILE",
+            encStr(displayName.trim().take(48)),
+            encStr(bio.trim().take(160)),
+            avatarB64
+        ).joinToString("|")
+    }
+
     fun decode(rawPlaintext: String, fallbackMsgId: String): Decoded {
         if (!rawPlaintext.startsWith(PREFIX)) {
             return Decoded.Text(
@@ -267,6 +308,26 @@ object E2eeChatEnvelope {
                     targetMsgId = decStr(parts.getOrElse(2) { "" }),
                     emoji = decStr(parts.getOrElse(3) { "" })
                 )
+
+                "DELETE" -> Decoded.Delete(
+                    targetMsgId = decStr(parts.getOrElse(2) { "" })
+                )
+
+                "PROFILE" -> {
+                    val avatarRaw = parts.getOrElse(4) { "" }
+                    val avatarDecoded = if (avatarRaw.isNotEmpty()) {
+                        try {
+                            b64Dec.decode(avatarRaw)
+                        } catch (_: Exception) {
+                            null
+                        }
+                    } else null
+                    Decoded.Profile(
+                        displayName = decStr(parts.getOrElse(2) { "" }),
+                        bio = decStr(parts.getOrElse(3) { "" }),
+                        avatarBytes = avatarDecoded
+                    )
+                }
 
                 else -> Decoded.Text(
                     msgId = fallbackMsgId,
@@ -339,7 +400,8 @@ object EncryptedFileTransferEngine {
         rawFileName: String,
         mimeType: String,
         payloadBytes: ByteArray,
-        stripImageMetadata: Boolean = true
+        stripImageMetadata: Boolean = true,
+        onChunkEncryptProgress: ((chunksDone: Int, totalChunks: Int) -> Unit)? = null
     ): EncryptedChunkBundle {
         require(payloadBytes.isNotEmpty() && payloadBytes.size <= MAX_FILE_SIZE_BYTES) {
             "File size ${payloadBytes.size} bytes is outside allowed bounds (1..$MAX_FILE_SIZE_BYTES)"
@@ -382,6 +444,7 @@ object EncryptedFileTransferEngine {
                     ciphertextWithTag = ct
                 )
             )
+            onChunkEncryptProgress?.invoke(chunkIdx + 1, totalChunks)
         }
 
         val manifest = EncryptedFileManifest(

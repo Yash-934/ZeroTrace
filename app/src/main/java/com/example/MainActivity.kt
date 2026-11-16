@@ -1,26 +1,52 @@
 package com.example
 
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Fingerprint
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zerotrace.bridge.CallMediaKind
+import com.zerotrace.security.BiometricAuthHelper
 import com.zerotrace.security.SecureWindowManager
 import com.zerotrace.ui.AppLanguage
 import com.zerotrace.ui.ZeroTraceScreen
@@ -44,11 +70,13 @@ import com.zerotrace.ui.pairing.AddContactScreen
 import com.zerotrace.ui.pairing.ContactVerificationScreen
 import com.zerotrace.ui.settings.ZeroTracePrivacyCenterScreen
 import com.zerotrace.ui.settings.ZeroTraceSettingsScreen
+import com.zerotrace.ui.theme.CrimsonDanger
 import com.zerotrace.ui.theme.ZeroTraceTheme
 import com.zerotrace.ui.updates.ZeroTraceStatusViewerScreen
 import com.zerotrace.ui.updates.ZeroTraceUpdatesTabScreen
+import kotlinx.coroutines.delay
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
 
     private val viewModel: ZeroTraceViewModel by viewModels()
 
@@ -65,6 +93,49 @@ class MainActivity : ComponentActivity() {
                 SecureWindowManager.setSecureFlag(window, uiState.flagSecureEnabled)
             }
 
+            val launchUnlockPrompt = {
+                BiometricAuthHelper.authenticate(
+                    activity = this@MainActivity,
+                    title = "Unlock ZeroTrace",
+                    subtitle = "Verify fingerprint or device lock",
+                    description = "Authenticate to access your encrypted messages and Tor identity.",
+                    onSuccess = { viewModel.onBiometricUnlockSucceeded() },
+                    onError = { err -> viewModel.onBiometricUnlockError(err) }
+                )
+            }
+
+            val handleToggleBiometric: (Boolean) -> Unit = { enable ->
+                if (!enable) {
+                    viewModel.setBiometricAppLockEnabled(false)
+                } else {
+                    BiometricAuthHelper.authenticate(
+                        activity = this@MainActivity,
+                        title = "Enable Fingerprint Lock",
+                        subtitle = "Confirm your fingerprint to arm app lock",
+                        description = "ZeroTrace will require biometric verification on launch and resume.",
+                        onSuccess = {
+                            viewModel.setBiometricAppLockEnabled(true)
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Biometric fingerprint lock enabled.",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        },
+                        onError = { err ->
+                            viewModel.onBiometricUnlockError(err)
+                            Toast.makeText(this@MainActivity, err, Toast.LENGTH_LONG).show()
+                        }
+                    )
+                }
+            }
+
+            LaunchedEffect(uiState.isAppBiometricLocked, uiState.identitySummary != null) {
+                if (uiState.isAppBiometricLocked && uiState.identitySummary != null) {
+                    delay(180L)
+                    launchUnlockPrompt()
+                }
+            }
+
             ZeroTraceTheme(
                 themeMode = uiState.themeMode,
                 accentPalette = uiState.accentPalette
@@ -75,10 +146,19 @@ class MainActivity : ComponentActivity() {
                         .background(MaterialTheme.colorScheme.background)
                         .windowInsetsPadding(WindowInsets.safeDrawing)
                 ) {
-                    ZeroTraceRootApp(
-                        viewModel = viewModel,
-                        isFlagSecureActive = uiState.flagSecureEnabled
-                    )
+                    if (uiState.isAppBiometricLocked && uiState.identitySummary != null) {
+                        BiometricLockGateScreen(
+                            isHindi = uiState.language == AppLanguage.HINDI,
+                            errorMessage = uiState.biometricPromptMessage,
+                            onUnlockClick = launchUnlockPrompt
+                        )
+                    } else {
+                        ZeroTraceRootApp(
+                            viewModel = viewModel,
+                            isFlagSecureActive = uiState.flagSecureEnabled,
+                            onRequestToggleBiometric = handleToggleBiometric
+                        )
+                    }
                 }
             }
         }
@@ -86,8 +166,101 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
-        if (viewModel.uiState.value.autoLockOnBackground && viewModel.uiState.value.activeSessionHandle != null) {
+        viewModel.lockAppIfBiometricEnabled()
+        val state = viewModel.uiState.value
+        if (state.autoLockOnBackground && !state.foreverVaultEnabled && state.activeSessionHandle != null) {
             viewModel.terminateActiveChatSession()
+        }
+    }
+}
+
+@Composable
+private fun BiometricLockGateScreen(
+    isHindi: Boolean,
+    errorMessage: String?,
+    onUnlockClick: () -> Unit
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.background,
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("biometric_lock_gate_screen")
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(92.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Fingerprint,
+                    contentDescription = "Biometric Lock",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(54.dp)
+                )
+            }
+            Spacer(modifier = Modifier.height(22.dp))
+            Text(
+                text = if (isHindi) "ZeroTrace लॉक है" else "ZeroTrace Locked",
+                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
+                color = MaterialTheme.colorScheme.onBackground
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = if (isHindi) {
+                    "अपनी पोस्ट-क्वांटम एन्क्रिप्टेड चैट और कीस्टोर वॉल्ट खोलने के लिए फ़िंगरप्रिंट सत्यापित करें।"
+                } else {
+                    "Verify your fingerprint or device screen lock to open your encrypted Keystore vault."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+            if (!errorMessage.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(14.dp))
+                Surface(
+                    color = CrimsonDanger.copy(alpha = 0.12f),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, CrimsonDanger.copy(alpha = 0.45f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = errorMessage,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = CrimsonDanger,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(26.dp))
+            Button(
+                onClick = onUnlockClick,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
+                ),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .testTag("biometric_unlock_button")
+            ) {
+                Icon(Icons.Default.Shield, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = if (isHindi) "फ़िंगरप्रिंट से अनलॉक करें" else "Unlock with Fingerprint",
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
     }
 }
@@ -95,7 +268,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun ZeroTraceRootApp(
     viewModel: ZeroTraceViewModel,
-    isFlagSecureActive: Boolean
+    isFlagSecureActive: Boolean,
+    onRequestToggleBiometric: (Boolean) -> Unit = viewModel::setBiometricAppLockEnabled
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val connectivityState by viewModel.connectivityState.collectAsStateWithLifecycle()
@@ -112,6 +286,11 @@ fun ZeroTraceRootApp(
 
     val effectiveErrorBanner = uiState.errorBannerMessage ?: transportError
     val isHindi = uiState.language == AppLanguage.HINDI
+    val activeCallAvatarBytes = uiState.activeCallState?.peerOnion?.let { peerOnion ->
+        uiState.verifiedContacts.firstOrNull {
+            it.onionAddress.equals(peerOnion, ignoreCase = true)
+        }?.avatarBytes
+    }
 
     when (uiState.currentScreen) {
         ZeroTraceScreen.SPLASH -> {
@@ -219,6 +398,8 @@ fun ZeroTraceRootApp(
                             ZeroTraceUpdatesTabScreen(
                                 language = uiState.language,
                                 identitySummary = uiState.identitySummary,
+                                localAvatarBytes = uiState.localProfile.avatarJpegBytes,
+                                verifiedContacts = uiState.verifiedContacts,
                                 connectivityState = connectivityState,
                                 torProgress = torProgress,
                                 statuses = uiState.ephemeralStatuses,
@@ -265,24 +446,30 @@ fun ZeroTraceRootApp(
                             ZeroTraceSettingsScreen(
                                 language = uiState.language,
                                 identitySummary = uiState.identitySummary,
+                                localProfile = uiState.localProfile,
                                 connectivityState = connectivityState,
                                 torProgress = torProgress,
                                 themeMode = uiState.themeMode,
                                 accentPalette = uiState.accentPalette,
                                 wallpaperStyle = uiState.wallpaperStyle,
+                                foreverVaultEnabled = uiState.foreverVaultEnabled,
                                 sessionTimeoutSeconds = uiState.sessionTimeoutSeconds,
                                 autoLockOnBackground = uiState.autoLockOnBackground,
+                                biometricAppLockEnabled = uiState.biometricAppLockEnabled,
                                 flagSecureEnabled = uiState.flagSecureEnabled,
                                 transportBackend = transportBackend,
                                 volatileMessagesInRamCount = totalRichMsgsInRam,
                                 volatileStatusesInRamCount = uiState.ephemeralStatuses.size,
                                 volatileCallsInRamCount = uiState.callHistory.size,
+                                onUpdateLocalProfile = viewModel::updateLocalUserProfile,
                                 onSelectThemeMode = viewModel::setThemeMode,
                                 onSelectAccentPalette = viewModel::setAccentPalette,
                                 onSelectWallpaperStyle = viewModel::setWallpaperStyle,
                                 onSelectLanguage = viewModel::setLanguage,
+                                onToggleForeverVault = viewModel::setForeverVaultEnabled,
                                 onSelectTimeoutSeconds = viewModel::setSessionTimeoutSeconds,
                                 onToggleAutoLock = viewModel::setAutoLockOnBackground,
+                                onRequestToggleBiometric = onRequestToggleBiometric,
                                 onToggleFlagSecure = viewModel::setFlagSecureEnabled,
                                 onSelectTransportBackend = { viewModel.setTransportBackend(it) },
                                 onWipeVolatileCaches = viewModel::wipeAllVolatileCachesAndMediaInRam,
@@ -371,6 +558,7 @@ fun ZeroTraceRootApp(
                 onReplySelected = viewModel::setReplyingToMessage,
                 onReactMessage = viewModel::reactToMessage,
                 onDeleteMessageFromRam = viewModel::deleteSingleMessageFromRam,
+                onDeleteMessageForEveryone = viewModel::deleteMessageForEveryone,
                 onInspectMessageInfo = viewModel::setInspectedMessageInfo,
                 onOpenMediaPreview = viewModel::openMediaPreview,
                 onSaveMediaToGallery = viewModel::saveMessageMediaToGallery,
@@ -431,6 +619,8 @@ fun ZeroTraceRootApp(
                 statuses = uiState.activeViewingStatuses,
                 currentIndex = uiState.activeViewingStatusIndex,
                 fallbackStatus = uiState.activeViewingStatus,
+                localAvatarBytes = uiState.localProfile.avatarJpegBytes,
+                verifiedContacts = uiState.verifiedContacts,
                 onStepStatus = viewModel::stepViewingStatus,
                 onBack = { viewModel.navigateBack() },
                 onReplyToStatus = { statusItem, replyText ->
@@ -444,6 +634,7 @@ fun ZeroTraceRootApp(
         ZeroTraceScreen.VOICE_CALL -> {
             ZeroTraceVoiceCallScreen(
                 callState = uiState.activeCallState,
+                peerAvatarBytes = activeCallAvatarBytes,
                 onToggleMute = viewModel::toggleCallMute,
                 onToggleSpeaker = viewModel::toggleCallSpeaker,
                 onUpgradeToVideo = viewModel::toggleCallCamera,
@@ -454,6 +645,7 @@ fun ZeroTraceRootApp(
         ZeroTraceScreen.VIDEO_CALL -> {
             ZeroTraceVideoCallScreen(
                 callState = uiState.activeCallState,
+                peerAvatarBytes = activeCallAvatarBytes,
                 remoteVideoFrame = remoteCallVideoFrame,
                 onLocalCameraFrame = viewModel::submitLocalCallVideoFrame,
                 onToggleMute = viewModel::toggleCallMute,
@@ -466,6 +658,7 @@ fun ZeroTraceRootApp(
         ZeroTraceScreen.INCOMING_CALL -> {
             ZeroTraceIncomingCallScreen(
                 callState = uiState.activeCallState,
+                peerAvatarBytes = activeCallAvatarBytes,
                 onAcceptCall = viewModel::acceptIncomingEncryptedCall,
                 onDeclineCall = viewModel::endActiveCall,
                 onQuickMessageReply = {
@@ -512,7 +705,7 @@ fun ZeroTraceRootApp(
                 metadataMinimizedMode = uiState.metadataMinimizedMode,
                 onToggleFlagSecure = viewModel::setFlagSecureEnabled,
                 onToggleAutoLock = viewModel::setAutoLockOnBackground,
-                onToggleBiometricAppLock = viewModel::setBiometricAppLockEnabled,
+                onToggleBiometricAppLock = onRequestToggleBiometric,
                 onSelectDisappearingTimer = viewModel::setDisappearingMessageTimer,
                 onToggleReadReceipts = viewModel::setReadReceiptsEnabled,
                 onToggleTypingIndicators = viewModel::setTypingIndicatorsEnabled,
@@ -540,3 +733,4 @@ fun ZeroTraceRootApp(
         }
     }
 }
+

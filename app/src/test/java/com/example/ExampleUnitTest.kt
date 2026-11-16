@@ -829,7 +829,221 @@ class ExampleUnitTest {
         assertEquals(2, kapilGroup.size)
         assertEquals(1, kapilGroup.count { !it.viewedByLocalUser })
     }
+
+    @Test
+    fun e2eeChatEnvelope_deleteAndProfileRoundTrip() {
+        val deleteWire = com.zerotrace.bridge.E2eeChatEnvelope.encodeDelete("msg-delete-99")
+        val decodedDelete = com.zerotrace.bridge.E2eeChatEnvelope.decode(deleteWire, "fallback")
+            as com.zerotrace.bridge.E2eeChatEnvelope.Decoded.Delete
+        assertEquals("msg-delete-99", decodedDelete.targetMsgId)
+
+        val avatarSample = ByteArray(128) { (it * 5 + 11).toByte() }
+        val profileWire = com.zerotrace.bridge.E2eeChatEnvelope.encodeProfile(
+            displayName = "  Aarav Sharma  ",
+            bio = "  Zero-knowledge Tor Messenger  ",
+            avatarBytes = avatarSample
+        )
+        val decodedProfile = com.zerotrace.bridge.E2eeChatEnvelope.decode(profileWire, "fallback")
+            as com.zerotrace.bridge.E2eeChatEnvelope.Decoded.Profile
+        assertEquals("Aarav Sharma", decodedProfile.displayName)
+        assertEquals("Zero-knowledge Tor Messenger", decodedProfile.bio)
+        assertNotNull(decodedProfile.avatarBytes)
+        assertArrayEquals(avatarSample, decodedProfile.avatarBytes)
+
+        val noAvatarWire = com.zerotrace.bridge.E2eeChatEnvelope.encodeProfile(
+            displayName = "Anon",
+            bio = "",
+            avatarBytes = null
+        )
+        val decodedNoAvatar = com.zerotrace.bridge.E2eeChatEnvelope.decode(noAvatarWire, "fallback")
+            as com.zerotrace.bridge.E2eeChatEnvelope.Decoded.Profile
+        assertEquals("Anon", decodedNoAvatar.displayName)
+        assertEquals("", decodedNoAvatar.bio)
+        assertEquals(null, decodedNoAvatar.avatarBytes)
+    }
+
+    @Test
+    fun encryptedVaultCodec_prefsAndProfileRoundTrip() {
+        val avatar = ByteArray(256) { (it xor 0x5A).toByte() }
+        val snapshot = com.zerotrace.security.PersistedPrefsSnapshot(
+            profile = com.zerotrace.bridge.LocalUserProfile(
+                displayName = "Kapil",
+                bio = "End-to-end encrypted over Tor v3",
+                avatarJpegBytes = avatar,
+                updatedAtEpochSec = 1_763_200_123L
+            ),
+            foreverVaultEnabled = true,
+            sessionTimeoutSeconds = 0L,
+            disappearingMessageTimerSec = 3600L,
+            biometricAppLockEnabled = true,
+            flagSecureEnabled = true,
+            autoLockOnBackground = false,
+            readReceiptsEnabled = true,
+            typingIndicatorsEnabled = false,
+            metadataMinimizedMode = true,
+            themeModeName = "DARK",
+            accentPaletteName = "WHATSAPP_GREEN",
+            wallpaperStyleName = "WHATSAPP_DOODLE",
+            languageCode = "hi",
+            pinnedOnions = setOf("peer1.onion"),
+            mutedOnions = setOf("peer2.onion"),
+            archivedOnions = setOf("peer3.onion"),
+            blockedOnions = setOf("peer4.onion")
+        )
+
+        val encoded = com.zerotrace.security.EncryptedVaultCodec.encodePrefsAndProfile(snapshot)
+        val decoded = com.zerotrace.security.EncryptedVaultCodec.decodePrefsAndProfile(encoded)
+        assertNotNull(decoded)
+        assertEquals("Kapil", decoded!!.profile.displayName)
+        assertEquals("End-to-end encrypted over Tor v3", decoded.profile.bio)
+        assertArrayEquals(avatar, decoded.profile.avatarJpegBytes)
+        assertEquals(1_763_200_123L, decoded.profile.updatedAtEpochSec)
+        assertTrue(decoded.foreverVaultEnabled)
+        assertEquals(0L, decoded.sessionTimeoutSeconds)
+        assertEquals(3600L, decoded.disappearingMessageTimerSec)
+        assertTrue(decoded.biometricAppLockEnabled)
+        assertTrue(decoded.flagSecureEnabled)
+        assertFalse(decoded.autoLockOnBackground)
+        assertEquals("DARK", decoded.themeModeName)
+        assertEquals("hi", decoded.languageCode)
+        assertEquals(setOf("peer1.onion"), decoded.pinnedOnions)
+        assertEquals(setOf("peer4.onion"), decoded.blockedOnions)
+
+        // Corrupted header magic must return null cleanly
+        val corrupted = encoded.copyOf()
+        corrupted[0] = 0x00
+        assertEquals(null, com.zerotrace.security.EncryptedVaultCodec.decodePrefsAndProfile(corrupted))
+    }
+
+    @Test
+    fun encryptedVaultCodec_chatVaultPreservesMessagesTombstonesCallsAndFiltersExpiredStatuses() {
+        val now = System.currentTimeMillis()
+        val peerOnion = "testpeer1234567890abcdef.onion"
+        val attachmentBytes = byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8)
+        val normalMsg = com.zerotrace.bridge.RichConversationMessage(
+            id = "m-1",
+            senderLabel = "You",
+            bodyText = "Photo attached",
+            timestampEpochMillis = now - 5_000L,
+            isOutgoing = true,
+            ratchetStepIndex = 2,
+            pqEpoch = 1,
+            pqBraidAdvanced = false,
+            payloadKind = com.zerotrace.bridge.MessagePayloadKind.IMAGE,
+            fileTransfer = com.zerotrace.bridge.EncryptedTransferProgress(
+                manifest = com.zerotrace.bridge.EncryptedFileManifest(
+                    transferId = "tx-1",
+                    sanitizedFileName = "pic.jpg",
+                    mimeType = "image/jpeg",
+                    totalSizeBytes = attachmentBytes.size,
+                    totalChunks = 1,
+                    sha256DigestHex = "cd".repeat(32)
+                ),
+                direction = com.zerotrace.bridge.TransferDirection.OUTGOING,
+                state = com.zerotrace.bridge.TransferLifecycleState.VERIFIED_READY_IN_RAM,
+                chunksProcessed = 1,
+                bytesTransferred = attachmentBytes.size.toLong(),
+                decryptedInMemoryBytes = attachmentBytes
+            ),
+            deliveryState = com.zerotrace.bridge.MessageDeliveryState.READ
+        )
+        val deletedTombstone = com.zerotrace.bridge.RichConversationMessage(
+            id = "m-2",
+            senderLabel = "Peer",
+            bodyText = "This message was deleted",
+            timestampEpochMillis = now - 2_000L,
+            isOutgoing = false,
+            ratchetStepIndex = 3,
+            pqEpoch = 1,
+            pqBraidAdvanced = false,
+            isDeletedPlaceholder = true
+        )
+        val activeStatus = com.zerotrace.bridge.EphemeralStatusItem(
+            statusId = "st-active",
+            authorAlias = "You",
+            authorOnion = "local.onion",
+            isOwnStatus = true,
+            mediaType = com.zerotrace.bridge.StatusMediaType.TEXT_CARD,
+            captionText = "Active 24h status",
+            backgroundHex = "#075E54",
+            createdAtEpochMillis = now - 60_000L
+        )
+        val expiredStatus = com.zerotrace.bridge.EphemeralStatusItem(
+            statusId = "st-expired",
+            authorAlias = "You",
+            authorOnion = "local.onion",
+            isOwnStatus = true,
+            mediaType = com.zerotrace.bridge.StatusMediaType.TEXT_CARD,
+            captionText = "Expired status",
+            backgroundHex = "#075E54",
+            createdAtEpochMillis = now - com.zerotrace.bridge.STATUS_TTL_24H_MS - 5_000L
+        )
+        val callEntry = com.zerotrace.bridge.VolatileCallHistoryEntry(
+            callId = "c-1",
+            peerAlias = "Alice",
+            peerOnion = peerOnion,
+            mediaKind = com.zerotrace.bridge.CallMediaKind.VIDEO,
+            isIncoming = false,
+            wasMissed = false,
+            durationSeconds = 45L,
+            timestampEpochMillis = now - 10_000L
+        )
+
+        val vault = com.zerotrace.security.PersistedChatVaultSnapshot(
+            richMessagesByOnion = mapOf(peerOnion to listOf(normalMsg, deletedTombstone)),
+            lastMessagePreviewByOnion = mapOf(peerOnion to "This message was deleted"),
+            lastMessageTimeByOnion = mapOf(peerOnion to now - 2_000L),
+            unreadCountByOnion = mapOf(peerOnion to 1),
+            callHistory = listOf(callEntry),
+            ephemeralStatuses = listOf(activeStatus, expiredStatus)
+        )
+
+        val encoded = com.zerotrace.security.EncryptedVaultCodec.encodeChatVault(vault)
+        val decoded = com.zerotrace.security.EncryptedVaultCodec.decodeChatVault(encoded)
+        assertNotNull(decoded)
+
+        val restoredMsgs = decoded!!.richMessagesByOnion[peerOnion]!!
+        assertEquals(2, restoredMsgs.size)
+        assertFalse(restoredMsgs[0].isDeletedPlaceholder)
+        assertArrayEquals(attachmentBytes, restoredMsgs[0].fileTransfer?.decryptedInMemoryBytes)
+        assertEquals(com.zerotrace.bridge.MessageDeliveryState.READ, restoredMsgs[0].deliveryState)
+
+        assertTrue(restoredMsgs[1].isDeletedPlaceholder)
+        assertEquals("This message was deleted", restoredMsgs[1].bodyText)
+
+        assertEquals(1, decoded.callHistory.size)
+        assertEquals(com.zerotrace.bridge.CallMediaKind.VIDEO, decoded.callHistory[0].mediaKind)
+
+        // Only non-expired 24h statuses survive vault encoding/decoding
+        assertEquals(1, decoded.ephemeralStatuses.size)
+        assertEquals("st-active", decoded.ephemeralStatuses[0].statusId)
+    }
+
+    @Test
+    fun encryptedTransferProgress_effectiveFractionUsesExplicitProgressOrChunkRatio() {
+        val manifest = com.zerotrace.bridge.EncryptedFileManifest(
+            transferId = "tx-prog",
+            sanitizedFileName = "video.mp4",
+            mimeType = "video/mp4",
+            totalSizeBytes = 128_000,
+            totalChunks = 4,
+            sha256DigestHex = "11".repeat(32)
+        )
+        val explicit = com.zerotrace.bridge.EncryptedTransferProgress(
+            manifest = manifest,
+            direction = com.zerotrace.bridge.TransferDirection.OUTGOING,
+            state = com.zerotrace.bridge.TransferLifecycleState.TRANSMITTING_OVER_TOR,
+            chunksProcessed = 1,
+            bytesTransferred = 32_000,
+            uploadProgressFraction = 0.65f
+        )
+        assertEquals(0.65f, explicit.effectiveFraction(), 0.0001f)
+
+        val fallback = explicit.copy(chunksProcessed = 2, uploadProgressFraction = null)
+        assertEquals(0.50f, fallback.effectiveFraction(), 0.0001f)
+    }
 }
+
 
 
 

@@ -15,6 +15,7 @@ import com.zerotrace.bridge.EncryptedFileManifest
 import com.zerotrace.bridge.EncryptedFileTransferEngine
 import com.zerotrace.bridge.EncryptedTransferProgress
 import com.zerotrace.bridge.EphemeralStatusItem
+import com.zerotrace.bridge.LocalUserProfile
 import com.zerotrace.bridge.MessageDeliveryState
 import com.zerotrace.bridge.MessagePayloadKind
 import com.zerotrace.bridge.NativeRustBridge
@@ -44,8 +45,11 @@ import com.zerotrace.network.TorOnionTransportManager
 import com.zerotrace.network.TorTransportBackend
 import com.zerotrace.security.BackupPolicy
 import com.zerotrace.security.DeviceIntegrityReport
+import com.zerotrace.security.EncryptedVaultCodec
 import com.zerotrace.security.HardwareSecurityLevel
 import com.zerotrace.security.KeystoreManager
+import com.zerotrace.security.PersistedChatVaultSnapshot
+import com.zerotrace.security.PersistedPrefsSnapshot
 import com.zerotrace.security.SecureWindowManager
 import com.zerotrace.ui.components.MainBottomTab
 import com.zerotrace.ui.theme.AccentPalette
@@ -157,11 +161,15 @@ data class ZeroTraceUiState(
     val callHistory: List<VolatileCallHistoryEntry> = emptyList(),
     val callFilter: CallDirectionFilter = CallDirectionFilter.ALL,
     val callSearchQuery: String = "",
-    // Privacy & Security Controls
-    val sessionTimeoutSeconds: Long = 300L,
-    val disappearingMessageTimerSec: Long = 300L,
+    // Privacy, Security & Persistent Forever Vault Controls
+    val localProfile: LocalUserProfile = LocalUserProfile(),
+    val foreverVaultEnabled: Boolean = true,
+    val sessionTimeoutSeconds: Long = 0L, // 0L = Forever Encrypted Vault
+    val disappearingMessageTimerSec: Long = 0L,
     val autoLockOnBackground: Boolean = false,
     val biometricAppLockEnabled: Boolean = false,
+    val isAppBiometricLocked: Boolean = false,
+    val biometricPromptMessage: String? = null,
     val flagSecureEnabled: Boolean = false,
     val readReceiptsEnabled: Boolean = true,
     val typingIndicatorsEnabled: Boolean = true,
@@ -196,6 +204,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
     private var inactivityWatchdogJob: Job? = null
     private var callTimerJob: Job? = null
     private val processedVolatileMsgKeys = ConcurrentHashMap.newKeySet<String>()
+    private val vaultPersistLock = Any()
 
     // Active / pending E2EE call key & signaling state (RAM only)
     private var pendingCallPrivKey32: ByteArray? = null
@@ -273,6 +282,22 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                                 errorBannerMessage = null
                             )
                         }
+                        // Share our encrypted E2EE profile (name, bio, avatar) with the newly established session
+                        val localProf = _uiState.value.localProfile
+                        if (contact != null && !TorOnionTransportManager.isLoopbackVerificationContact(contact)) {
+                            viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                val profEnv = E2eeChatEnvelope.encodeProfile(
+                                    displayName = localProf.displayName,
+                                    bio = localProf.bio,
+                                    avatarBytes = localProf.avatarJpegBytes
+                                )
+                                TorOnionTransportManager.sendEncryptedMessageOverCircuit(
+                                    sessionHandle = event.sessionHandle,
+                                    plaintext = profEnv,
+                                    contact = contact
+                                )
+                            }
+                        }
                     }
                     is PeerTransportEvent.IncomingMessage -> {
                         val contact = _uiState.value.verifiedContacts.firstOrNull {
@@ -336,6 +361,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                                 activeRatchetMetrics = handle?.let { RustCoreBridge.getSessionMetrics(it) } ?: state.activeRatchetMetrics
                             )
                         }
+                        persistVaultIfForeverMode()
                     }
                     is PeerTransportEvent.ReadReceipt -> {
                         val canonicalOnion = _uiState.value.verifiedContacts.firstOrNull {
@@ -358,6 +384,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                             }
                             state.copy(richMessagesByOnion = updatedMap)
                         }
+                        persistVaultIfForeverMode()
                     }
                     is PeerTransportEvent.IncomingCallInvite -> {
                         handleIncomingCallInviteEvent(event)
@@ -403,6 +430,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                                     )
                                 }
                             }
+                            persistVaultIfForeverMode()
                         } else {
                             incoming.wipeFromRam()
                         }
@@ -449,7 +477,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val backupAudit = BackupPolicy.auditBackupConfiguration(appContext)
             val hwLevel = keystoreManager.getHardwareSecurityLevel()
-            delay(350)
+            delay(200)
 
             val storedIdentityBytes = try {
                 keystoreManager.loadWrappedIdentity()
@@ -468,13 +496,46 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     summary = migratedSummary
                 }
 
+                val loadedPrefs = try {
+                    keystoreManager.loadWrappedPrefsAndProfile()?.let { rawPrefs ->
+                        try {
+                            EncryptedVaultCodec.decodePrefsAndProfile(rawPrefs)
+                        } finally {
+                            Arrays.fill(rawPrefs, 0.toByte())
+                        }
+                    }
+                } catch (_: Exception) {
+                    null
+                } ?: PersistedPrefsSnapshot()
+
+                TorOnionTransportManager.preserveVaultOnTaskRemoved = loadedPrefs.foreverVaultEnabled
+
+                val loadedVault = if (loadedPrefs.foreverVaultEnabled) {
+                    try {
+                        keystoreManager.loadWrappedChatVault()?.let { rawVault ->
+                            try {
+                                EncryptedVaultCodec.decodeChatVault(rawVault)
+                            } finally {
+                                Arrays.fill(rawVault, 0.toByte())
+                            }
+                        }
+                    } catch (_: Exception) {
+                        null
+                    }
+                } else null
+
                 val loadedContacts = loadEncryptedContactsFromDisk()
                 val contacts = loadedContacts.map { TorOnionTransportManager.normalizeLoopbackContactIfNeeded(it) }
                 if (contacts != loadedContacts) {
                     saveEncryptedContactsToDisk(contacts)
                 }
-                contacts.forEach { seedLoopbackPeerEphemeralStatusIfNeeded(it) }
                 TorOnionTransportManager.registerVerifiedPeerOnions(contacts.map { it.onionAddress })
+
+                val themeMode = AppThemeMode.entries.find { it.name == loadedPrefs.themeModeName } ?: AppThemeMode.LIGHT
+                val accentPalette = AccentPalette.entries.find { it.name == loadedPrefs.accentPaletteName } ?: AccentPalette.EMERALD
+                val wallpaperStyle = ChatWallpaperStyle.entries.find { it.name == loadedPrefs.wallpaperStyleName } ?: ChatWallpaperStyle.OBSIDIAN_GRID
+                val language = AppLanguage.entries.find { it.code == loadedPrefs.languageCode } ?: AppLanguage.ENGLISH
+
                 _uiState.update {
                     it.copy(
                         currentScreen = ZeroTraceScreen.HOME,
@@ -483,16 +544,47 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                         identitySummary = summary,
                         hardwareSecurityLevel = keystoreManager.getHardwareSecurityLevel(),
                         verifiedContacts = contacts,
-                        backupAuditStatus = backupAudit
+                        backupAuditStatus = backupAudit,
+                        localProfile = loadedPrefs.profile,
+                        foreverVaultEnabled = loadedPrefs.foreverVaultEnabled,
+                        sessionTimeoutSeconds = loadedPrefs.sessionTimeoutSeconds,
+                        disappearingMessageTimerSec = loadedPrefs.disappearingMessageTimerSec,
+                        biometricAppLockEnabled = loadedPrefs.biometricAppLockEnabled,
+                        isAppBiometricLocked = loadedPrefs.biometricAppLockEnabled,
+                        flagSecureEnabled = loadedPrefs.flagSecureEnabled,
+                        autoLockOnBackground = loadedPrefs.autoLockOnBackground,
+                        readReceiptsEnabled = loadedPrefs.readReceiptsEnabled,
+                        typingIndicatorsEnabled = loadedPrefs.typingIndicatorsEnabled,
+                        metadataMinimizedMode = loadedPrefs.metadataMinimizedMode,
+                        themeMode = themeMode,
+                        accentPalette = accentPalette,
+                        wallpaperStyle = wallpaperStyle,
+                        language = language,
+                        pinnedOnions = loadedPrefs.pinnedOnions,
+                        mutedOnions = loadedPrefs.mutedOnions,
+                        archivedOnions = loadedPrefs.archivedOnions,
+                        blockedOnions = loadedPrefs.blockedOnions,
+                        richMessagesByOnion = loadedVault?.richMessagesByOnion ?: emptyMap(),
+                        lastMessagePreviewByOnion = loadedVault?.lastMessagePreviewByOnion ?: emptyMap(),
+                        lastMessageTimeByOnion = loadedVault?.lastMessageTimeByOnion ?: emptyMap(),
+                        unreadCountByOnion = loadedVault?.unreadCountByOnion ?: emptyMap(),
+                        callHistory = loadedVault?.callHistory ?: emptyList(),
+                        ephemeralStatuses = loadedVault?.ephemeralStatuses ?: emptyList()
                     )
                 }
+                contacts.forEach { seedLoopbackPeerEphemeralStatusIfNeeded(it) }
                 refreshMyPairingQr()
                 viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                     val torReady = TorOnionTransportManager.bootstrapTorAndStartOnionService()
-                    val warmTarget = contacts.firstOrNull { !TorOnionTransportManager.isLoopbackVerificationContact(it) }
-                        ?: contacts.firstOrNull()
-                    if (torReady && warmTarget != null) {
-                        establishWarmSessionInBackground(warmTarget)
+                    if (torReady) {
+                        val realPeers = contacts.filterNot { TorOnionTransportManager.isLoopbackVerificationContact(it) }
+                        if (realPeers.isNotEmpty()) {
+                            realPeers.forEach { peer ->
+                                launch { establishWarmSessionInBackground(peer) }
+                            }
+                        } else {
+                            contacts.firstOrNull()?.let { establishWarmSessionInBackground(it) }
+                        }
                     }
                 }
             } else {
@@ -512,24 +604,27 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         inactivityWatchdogJob = viewModelScope.launch {
             while (true) {
                 delay(5_000L)
-                val timeout = _uiState.value.sessionTimeoutSeconds
-                val purged = RustCoreBridge.purgeExpiredSessions(timeout)
-                if (purged > 0) {
-                    wipeAllRichMessagesInRam()
-                    TorOnionTransportManager.emergencyDisconnectAndWipe()
-                    _uiState.update {
-                        it.copy(
-                            activeSessionHandle = null,
-                            activePeerContact = null,
-                            activeChatMessages = emptyList(),
-                            richMessagesByOnion = emptyMap(),
-                            activeRatchetMetrics = null,
-                            currentScreen = if (it.currentScreen == ZeroTraceScreen.CHAT) ZeroTraceScreen.HOME else it.currentScreen,
-                            statusBannerMessage = isHi(
-                                "निष्क्रियता टाइमआउट: अस्थायी सत्र और RAM साफ़ कर दिए गए।",
-                                "Inactivity timeout reached: volatile session & RAM wiped."
+                val current = _uiState.value
+                val timeout = current.sessionTimeoutSeconds
+                if (!current.foreverVaultEnabled && timeout > 0L) {
+                    val purged = RustCoreBridge.purgeExpiredSessions(timeout)
+                    if (purged > 0) {
+                        wipeAllRichMessagesInRam()
+                        TorOnionTransportManager.emergencyDisconnectAndWipe()
+                        _uiState.update {
+                            it.copy(
+                                activeSessionHandle = null,
+                                activePeerContact = null,
+                                activeChatMessages = emptyList(),
+                                richMessagesByOnion = emptyMap(),
+                                activeRatchetMetrics = null,
+                                currentScreen = if (it.currentScreen == ZeroTraceScreen.CHAT) ZeroTraceScreen.HOME else it.currentScreen,
+                                statusBannerMessage = isHi(
+                                    "निष्क्रियता टाइमआउट: अस्थायी सत्र और RAM साफ़ कर दिए गए।",
+                                    "Inactivity timeout reached: volatile session & RAM wiped."
+                                )
                             )
-                        )
+                        }
                     }
                 }
                 // Enforce 24-hour auto-deletion & RAM zeroization for Ephemeral P2P Statuses
@@ -548,6 +643,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                             } else state.currentScreen
                         )
                     }
+                    persistVaultIfForeverMode()
                 }
             }
         }
@@ -681,6 +777,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                         )
                     )
                 }
+                persistPrefsToKeystore()
                 viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                     TorOnionTransportManager.bootstrapTorAndStartOnionService()
                 }
@@ -697,31 +794,78 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun setFlagSecureEnabled(enabled: Boolean) {
         _uiState.update { it.copy(flagSecureEnabled = enabled) }
+        persistPrefsToKeystore()
     }
 
     fun setThemeMode(mode: AppThemeMode) {
         _uiState.update { it.copy(themeMode = mode) }
+        persistPrefsToKeystore()
     }
 
     fun setAccentPalette(palette: AccentPalette) {
         _uiState.update { it.copy(accentPalette = palette) }
+        persistPrefsToKeystore()
     }
 
     fun setWallpaperStyle(style: ChatWallpaperStyle) {
         _uiState.update { it.copy(wallpaperStyle = style) }
+        persistPrefsToKeystore()
+    }
+
+    fun setForeverVaultEnabled(enabled: Boolean) {
+        TorOnionTransportManager.preserveVaultOnTaskRemoved = enabled
+        _uiState.update {
+            it.copy(
+                foreverVaultEnabled = enabled,
+                sessionTimeoutSeconds = if (enabled) 0L else it.sessionTimeoutSeconds.takeIf { s -> s > 0L } ?: 300L,
+                disappearingMessageTimerSec = if (enabled) 0L else it.disappearingMessageTimerSec.takeIf { s -> s > 0L } ?: 300L,
+                statusBannerMessage = if (enabled) {
+                    isHi(
+                        "फ़ॉरेवर एन्क्रिप्टेड वॉल्ट सक्रिय: सत्र सक्रिय रहेगा और पुरानी चैट Keystore AES-256-GCM में सुरक्षित रहेंगी।",
+                        "Forever Encrypted Vault ON: sessions stay live & chats persist under Keystore AES-256-GCM."
+                    )
+                } else {
+                    isHi(
+                        "अस्थायी RAM-केवल मोड सक्रिय: निष्क्रियता पर चैट स्वतः साफ़ होंगी।",
+                        "Strict Ephemeral RAM-Only Mode ON: inactive chats auto-wipe."
+                    )
+                }
+            )
+        }
+        persistPrefsToKeystore()
+        if (enabled) {
+            persistVaultIfForeverMode()
+        } else {
+            viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                keystoreManager.wipeWrappedChatVault()
+            }
+        }
     }
 
     fun setDisappearingMessageTimer(seconds: Long) {
+        val normalized = if (seconds <= 0L) 0L else seconds.coerceIn(60L, 86_400L)
+        val forever = normalized == 0L
+        TorOnionTransportManager.preserveVaultOnTaskRemoved = forever
         _uiState.update {
             it.copy(
-                disappearingMessageTimerSec = seconds,
-                sessionTimeoutSeconds = seconds.coerceIn(60L, 1800L)
+                foreverVaultEnabled = forever,
+                disappearingMessageTimerSec = normalized,
+                sessionTimeoutSeconds = normalized
             )
+        }
+        persistPrefsToKeystore()
+        if (forever) {
+            persistVaultIfForeverMode()
+        } else {
+            viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                keystoreManager.wipeWrappedChatVault()
+            }
         }
     }
 
     fun setReadReceiptsEnabled(enabled: Boolean) {
         _uiState.update { it.copy(readReceiptsEnabled = enabled) }
+        persistPrefsToKeystore()
         val activeState = _uiState.value
         val activePeer = activeState.activePeerContact
         if (enabled && activeState.currentScreen == ZeroTraceScreen.CHAT && activePeer != null) {
@@ -731,14 +875,93 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun setTypingIndicatorsEnabled(enabled: Boolean) {
         _uiState.update { it.copy(typingIndicatorsEnabled = enabled) }
+        persistPrefsToKeystore()
     }
 
     fun setBiometricAppLockEnabled(enabled: Boolean) {
-        _uiState.update { it.copy(biometricAppLockEnabled = enabled) }
+        _uiState.update {
+            it.copy(
+                biometricAppLockEnabled = enabled,
+                isAppBiometricLocked = if (!enabled) false else it.isAppBiometricLocked,
+                biometricPromptMessage = null
+            )
+        }
+        persistPrefsToKeystore()
+    }
+
+    fun lockAppIfBiometricEnabled() {
+        val state = _uiState.value
+        if (state.biometricAppLockEnabled && state.identitySummary != null) {
+            _uiState.update { it.copy(isAppBiometricLocked = true, biometricPromptMessage = null) }
+        }
+    }
+
+    fun onBiometricUnlockSucceeded() {
+        _uiState.update { it.copy(isAppBiometricLocked = false, biometricPromptMessage = null) }
+    }
+
+    fun onBiometricUnlockError(message: String) {
+        _uiState.update { it.copy(biometricPromptMessage = message) }
+    }
+
+    fun updateLocalUserProfile(
+        displayName: String,
+        bio: String,
+        newAvatarUri: Uri? = null,
+        removeAvatar: Boolean = false
+    ) {
+        val cleanName = displayName.trim().take(48).ifEmpty { "ZeroTrace User" }
+        val cleanBio = bio.trim().take(160)
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val resolvedAvatar = when {
+                    removeAvatar -> null
+                    newAvatarUri != null -> EncryptedVaultCodec.compressAvatarUriToCompactJpeg(appContext, newAvatarUri)
+                    else -> _uiState.value.localProfile.avatarJpegBytes
+                }
+                val updated = LocalUserProfile(
+                    displayName = cleanName,
+                    bio = cleanBio,
+                    avatarJpegBytes = resolvedAvatar,
+                    updatedAtEpochSec = System.currentTimeMillis() / 1000L
+                )
+                _uiState.update {
+                    it.copy(
+                        localProfile = updated,
+                        statusBannerMessage = isHi(
+                            "प्रोफ़ाइल अपडेट और एन्क्रिप्टेड रूप से सहेजा गया।",
+                            "Profile saved under Keystore AES-256-GCM & synced to active peers."
+                        )
+                    )
+                }
+                persistPrefsToKeystore()
+                val wireEnv = E2eeChatEnvelope.encodeProfile(
+                    displayName = updated.displayName,
+                    bio = updated.bio,
+                    avatarBytes = updated.avatarJpegBytes
+                )
+                for (contact in _uiState.value.verifiedContacts) {
+                    if (TorOnionTransportManager.isLoopbackVerificationContact(contact)) continue
+                    val handle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress)
+                    if (handle != null && TorOnionTransportManager.isPeerConnectedOnMesh(contact.onionAddress)) {
+                        TorOnionTransportManager.sendEncryptedMessageOverCircuit(
+                            sessionHandle = handle,
+                            plaintext = wireEnv,
+                            contact = contact
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(errorBannerMessage = "Profile update failed: ${e.message}")
+                }
+            }
+        }
     }
 
     fun setMetadataMinimizedMode(enabled: Boolean) {
         _uiState.update { it.copy(metadataMinimizedMode = enabled) }
+        persistPrefsToKeystore()
     }
 
     fun finishIdentityCreationToHome() {
@@ -792,6 +1015,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             if (!updated.add(onionAddress)) updated.remove(onionAddress)
             state.copy(pinnedOnions = updated)
         }
+        persistPrefsToKeystore()
     }
 
     fun toggleMuteConversation(onionAddress: String) {
@@ -800,6 +1024,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             if (!updated.add(onionAddress)) updated.remove(onionAddress)
             state.copy(mutedOnions = updated)
         }
+        persistPrefsToKeystore()
     }
 
     fun toggleArchiveConversation(onionAddress: String) {
@@ -808,6 +1033,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             if (!updated.add(onionAddress)) updated.remove(onionAddress)
             state.copy(archivedOnions = updated)
         }
+        persistPrefsToKeystore()
     }
 
     fun toggleBlockPeer(onionAddress: String) {
@@ -823,6 +1049,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             )
         }
+        persistPrefsToKeystore()
     }
 
     fun openContactProfile(contact: VerifiedContactRecord) {
@@ -863,6 +1090,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 statusBannerMessage = "Volatile chat RAM for ${onionAddress.take(10)}…onion zeroized."
             )
         }
+        persistVaultIfForeverMode()
     }
 
     // -------------------------------------------------------------------------
@@ -1260,6 +1488,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                             errorBannerMessage = null
                         )
                     }
+                    persistVaultIfForeverMode()
                 },
                 onFailure = { err ->
                     _uiState.update { state ->
@@ -1323,6 +1552,10 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun deleteSingleMessageFromRam(message: RichConversationMessage) {
+        deleteMessageForMe(message)
+    }
+
+    fun deleteMessageForMe(message: RichConversationMessage) {
         val contact = _uiState.value.activePeerContact ?: return
         message.wipeFromRam()
         _uiState.update { state ->
@@ -1330,10 +1563,76 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             val updatedList = currentList.filterNot { it.id == message.id }
             val map = state.richMessagesByOnion.toMutableMap()
             map[contact.onionAddress] = updatedList
+            val previews = state.lastMessagePreviewByOnion.toMutableMap()
+            val last = updatedList.lastOrNull()
+            if (last != null) {
+                previews[contact.onionAddress] = last.bodyText
+            } else {
+                previews.remove(contact.onionAddress)
+            }
             state.copy(
                 richMessagesByOnion = map,
-                statusBannerMessage = "Message #${message.ratchetStepIndex} & associated keys zeroized from RAM."
+                lastMessagePreviewByOnion = previews,
+                statusBannerMessage = isHi("संदेश आपके डिवाइस से हटाया गया।", "Message deleted for you.")
             )
+        }
+        persistVaultIfForeverMode()
+    }
+
+    fun deleteMessageForEveryone(message: RichConversationMessage) {
+        val contact = _uiState.value.activePeerContact ?: return
+        if (!message.isOutgoing || message.isDeletedPlaceholder) {
+            deleteMessageForMe(message)
+            return
+        }
+        message.wipeFromRam()
+        val tombstoneText = isHi("आपने यह संदेश सभी के लिए हटा दिया", "You deleted this message")
+        _uiState.update { state ->
+            val currentList = state.richMessagesByOnion[contact.onionAddress].orEmpty()
+            val updatedList = currentList.map { item ->
+                if (item.id == message.id) {
+                    item.copy(
+                        bodyText = tombstoneText,
+                        payloadKind = MessagePayloadKind.TEXT,
+                        fileTransfer = null,
+                        reactionEmoji = null,
+                        voiceDurationSeconds = null,
+                        isDeletedPlaceholder = true
+                    )
+                } else {
+                    item
+                }
+            }
+            val map = state.richMessagesByOnion.toMutableMap()
+            map[contact.onionAddress] = updatedList
+            val previews = state.lastMessagePreviewByOnion.toMutableMap()
+            if (updatedList.lastOrNull()?.id == message.id) {
+                previews[contact.onionAddress] = "🚫 $tombstoneText"
+            }
+            state.copy(
+                richMessagesByOnion = map,
+                lastMessagePreviewByOnion = previews,
+                statusBannerMessage = isHi("संदेश सभी के लिए हटाया गया।", "Deleted for everyone over E2EE.")
+            )
+        }
+        persistVaultIfForeverMode()
+
+        if (!TorOnionTransportManager.isLoopbackVerificationContact(contact)) {
+            viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                var handle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress)
+                    ?: _uiState.value.activeSessionHandle
+                if (handle == null) {
+                    handle = TorOnionTransportManager.establishAuthenticatedPeerSession(contact).getOrNull()
+                }
+                if (handle != null) {
+                    val deleteEnvelope = E2eeChatEnvelope.encodeDelete(message.id)
+                    TorOnionTransportManager.sendEncryptedMessageOverCircuit(
+                        sessionHandle = handle,
+                        plaintext = deleteEnvelope,
+                        contact = contact
+                    )
+                }
+            }
         }
     }
 
@@ -1399,7 +1698,70 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun sendMediaFromUri(uri: Uri, kind: MessagePayloadKind) {
-        _uiState.update { it.copy(showAttachmentSheet = false) }
+        val contact = _uiState.value.activePeerContact
+        val replyTarget = _uiState.value.replyingToMessage
+        val preMsgId = UUID.randomUUID().toString()
+        val nowMs = System.currentTimeMillis()
+        val peekMeta = MediaRamLoader.peekUriMeta(appContext, uri, kind)
+        val safePreName = EncryptedFileTransferEngine.sanitizeFileName(peekMeta.fileName)
+        val estChunks = ((peekMeta.estimatedSizeBytes + EncryptedFileTransferEngine.CHUNK_SIZE_BYTES - 1) /
+            EncryptedFileTransferEngine.CHUNK_SIZE_BYTES).coerceAtLeast(1)
+
+        if (contact != null) {
+            val placeholderMsg = RichConversationMessage(
+                id = preMsgId,
+                senderLabel = "You",
+                bodyText = "Uploading $safePreName…",
+                timestampEpochMillis = nowMs,
+                isOutgoing = true,
+                ratchetStepIndex = (_uiState.value.activeRatchetMetrics?.sendCount ?: 0L).toInt(),
+                pqEpoch = _uiState.value.activeRatchetMetrics?.ratchetEpoch ?: 1,
+                pqBraidAdvanced = false,
+                payloadKind = kind,
+                replyToMessageId = replyTarget?.id,
+                replyToPreview = replyTarget?.bodyText?.take(80),
+                replyToSenderLabel = replyTarget?.senderLabel,
+                fileTransfer = EncryptedTransferProgress(
+                    manifest = EncryptedFileManifest(
+                        transferId = UUID.randomUUID().toString(),
+                        sanitizedFileName = safePreName,
+                        mimeType = peekMeta.mimeType,
+                        totalSizeBytes = peekMeta.estimatedSizeBytes,
+                        totalChunks = estChunks,
+                        sha256DigestHex = ""
+                    ),
+                    direction = TransferDirection.OUTGOING,
+                    state = TransferLifecycleState.ENCRYPTING_AND_CHUNKING,
+                    chunksProcessed = 0,
+                    bytesTransferred = 0L,
+                    decryptedInMemoryBytes = null,
+                    uploadProgressFraction = 0.06f
+                ),
+                deliveryState = MessageDeliveryState.SENDING
+            )
+            _uiState.update { state ->
+                val currentRich = state.richMessagesByOnion[contact.onionAddress].orEmpty()
+                val updatedMap = state.richMessagesByOnion.toMutableMap()
+                updatedMap[contact.onionAddress] = currentRich + placeholderMsg
+                val previews = state.lastMessagePreviewByOnion.toMutableMap().apply {
+                    put(contact.onionAddress, "📎 $safePreName")
+                }
+                val times = state.lastMessageTimeByOnion.toMutableMap().apply {
+                    put(contact.onionAddress, nowMs)
+                }
+                state.copy(
+                    showAttachmentSheet = false,
+                    replyingToMessage = null,
+                    richMessagesByOnion = updatedMap,
+                    lastMessagePreviewByOnion = previews,
+                    lastMessageTimeByOnion = times,
+                    errorBannerMessage = null
+                )
+            }
+        } else {
+            _uiState.update { it.copy(showAttachmentSheet = false) }
+        }
+
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             try {
                 val loaded = MediaRamLoader.loadUriToRam(appContext, uri, kind)
@@ -1408,9 +1770,20 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     fileName = loaded.fileName,
                     mimeType = loaded.mimeType,
                     samplePayloadBytes = loaded.payloadBytes,
-                    caption = loaded.caption
+                    caption = loaded.caption,
+                    existingMsgId = if (contact != null) preMsgId else null
                 )
             } catch (e: Exception) {
+                if (contact != null) {
+                    updateRichMessageTransferProgress(
+                        onionAddress = contact.onionAddress,
+                        msgId = preMsgId,
+                        state = TransferLifecycleState.INTEGRITY_FAILED,
+                        chunksProcessed = 0,
+                        bytesTransferred = 0L,
+                        failureReason = e.message ?: "Media load rejected"
+                    )
+                }
                 _uiState.update {
                     it.copy(errorBannerMessage = "Media load rejected: ${e.message}")
                 }
@@ -1444,12 +1817,13 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         mimeType: String,
         samplePayloadBytes: ByteArray,
         caption: String,
-        voiceDurationSec: Int? = null
+        voiceDurationSec: Int? = null,
+        existingMsgId: String? = null
     ) {
         val contact = _uiState.value.activePeerContact ?: return
         val replyTarget = _uiState.value.replyingToMessage
         val isRealPeer = !TorOnionTransportManager.isLoopbackVerificationContact(contact)
-        val msgId = UUID.randomUUID().toString()
+        val msgId = existingMsgId ?: UUID.randomUUID().toString()
         val provisionalTransferId = UUID.randomUUID().toString()
         val safeProvisionalName = EncryptedFileTransferEngine.sanitizeFileName(fileName)
         val totalChunksEst = ((samplePayloadBytes.size + EncryptedFileTransferEngine.CHUNK_SIZE_BYTES - 1) /
@@ -1488,24 +1862,38 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             deliveryState = MessageDeliveryState.SENDING
         )
 
-        _uiState.update { state ->
-            val currentRich = state.richMessagesByOnion[contact.onionAddress].orEmpty()
-            val updatedMap = state.richMessagesByOnion.toMutableMap()
-            updatedMap[contact.onionAddress] = currentRich + optimisticMsg
-            val previews = state.lastMessagePreviewByOnion.toMutableMap().apply {
-                val icon = if (kind == MessagePayloadKind.VOICE_NOTE) "🎤" else "📎"
-                put(contact.onionAddress, "$icon $safeProvisionalName")
+        if (existingMsgId == null) {
+            _uiState.update { state ->
+                val currentRich = state.richMessagesByOnion[contact.onionAddress].orEmpty()
+                val updatedMap = state.richMessagesByOnion.toMutableMap()
+                updatedMap[contact.onionAddress] = currentRich + optimisticMsg
+                val previews = state.lastMessagePreviewByOnion.toMutableMap().apply {
+                    val icon = if (kind == MessagePayloadKind.VOICE_NOTE) "🎤" else "📎"
+                    put(contact.onionAddress, "$icon $safeProvisionalName")
+                }
+                val times = state.lastMessageTimeByOnion.toMutableMap().apply {
+                    put(contact.onionAddress, nowMs)
+                }
+                state.copy(
+                    showAttachmentSheet = false,
+                    replyingToMessage = null,
+                    richMessagesByOnion = updatedMap,
+                    lastMessagePreviewByOnion = previews,
+                    lastMessageTimeByOnion = times,
+                    errorBannerMessage = null
+                )
             }
-            val times = state.lastMessageTimeByOnion.toMutableMap().apply {
-                put(contact.onionAddress, nowMs)
-            }
-            state.copy(
-                showAttachmentSheet = false,
-                replyingToMessage = null,
-                richMessagesByOnion = updatedMap,
-                lastMessagePreviewByOnion = previews,
-                lastMessageTimeByOnion = times,
-                errorBannerMessage = null
+        } else {
+            updateRichMessageTransferProgress(
+                onionAddress = contact.onionAddress,
+                msgId = msgId,
+                state = TransferLifecycleState.ENCRYPTING_AND_CHUNKING,
+                chunksProcessed = 0,
+                bytesTransferred = 0L,
+                manifestOverride = provisionalManifest,
+                decryptedBytesOverride = samplePayloadBytes.copyOf(),
+                uploadProgressFraction = 0.14f,
+                bodyTextOverride = caption
             )
         }
 
@@ -1541,7 +1929,18 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     rawFileName = fileName,
                     mimeType = mimeType,
                     payloadBytes = samplePayloadBytes,
-                    stripImageMetadata = (kind == MessagePayloadKind.IMAGE)
+                    stripImageMetadata = (kind == MessagePayloadKind.IMAGE),
+                    onChunkEncryptProgress = { done, total ->
+                        val frac = 0.14f + 0.18f * (done.toFloat() / total.coerceAtLeast(1))
+                        updateRichMessageTransferProgress(
+                            onionAddress = contact.onionAddress,
+                            msgId = msgId,
+                            state = TransferLifecycleState.ENCRYPTING_AND_CHUNKING,
+                            chunksProcessed = done,
+                            bytesTransferred = ((done.toDouble() / total.coerceAtLeast(1)) * samplePayloadBytes.size).toLong(),
+                            uploadProgressFraction = frac
+                        )
+                    }
                 )
 
                 // 2. Verify round-trip chunk reassembly + SHA-256 integrity for local sender preview in RAM
@@ -1558,7 +1957,8 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     chunksProcessed = 0,
                     bytesTransferred = 0L,
                     manifestOverride = bundle.manifest,
-                    decryptedBytesOverride = reassembled
+                    decryptedBytesOverride = reassembled,
+                    uploadProgressFraction = 0.34f
                 )
 
                 // 3. Transmit actual ChaCha20-Poly1305 encrypted chunks to peer device (if real peer)
@@ -1571,13 +1971,16 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                         chunks = bundle.chunks,
                         onChunkProgress = { sent, total ->
                             if (sent == 1 || sent == total || sent % emitStep == 0) {
-                                val bytesDone = ((sent.toDouble() / total.coerceAtLeast(1)) * bundle.manifest.totalSizeBytes).toLong()
+                                val chunkRatio = sent.toFloat() / total.coerceAtLeast(1)
+                                val bytesDone = (chunkRatio * bundle.manifest.totalSizeBytes).toLong()
+                                val uploadFrac = 0.35f + 0.58f * chunkRatio
                                 updateRichMessageTransferProgress(
                                     onionAddress = contact.onionAddress,
                                     msgId = msgId,
                                     state = TransferLifecycleState.TRANSMITTING_OVER_TOR,
                                     chunksProcessed = sent,
-                                    bytesTransferred = bytesDone
+                                    bytesTransferred = bytesDone,
+                                    uploadProgressFraction = uploadFrac
                                 )
                             }
                         }
@@ -1600,6 +2003,9 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                         }
                         return@launch
                     }
+                } else {
+                    // Brief smooth step visibility on loopback verification path
+                    delay(180L)
                 }
 
                 updateRichMessageTransferProgress(
@@ -1607,7 +2013,8 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     msgId = msgId,
                     state = TransferLifecycleState.VERIFYING_INTEGRITY,
                     chunksProcessed = bundle.manifest.totalChunks,
-                    bytesTransferred = bundle.manifest.totalSizeBytes.toLong()
+                    bytesTransferred = bundle.manifest.totalSizeBytes.toLong(),
+                    uploadProgressFraction = 0.96f
                 )
 
                 val wireEnvelope = E2eeChatEnvelope.encodeMedia(
@@ -1643,7 +2050,8 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                             state = TransferLifecycleState.VERIFIED_READY_IN_RAM,
                             chunksProcessed = bundle.manifest.totalChunks,
                             bytesTransferred = bundle.manifest.totalSizeBytes.toLong(),
-                            decryptedInMemoryBytes = reassembled
+                            decryptedInMemoryBytes = reassembled,
+                            uploadProgressFraction = 1.0f
                         )
                         bundle.wipeZeroize()
 
@@ -1678,6 +2086,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                                 errorBannerMessage = null
                             )
                         }
+                        persistVaultIfForeverMode()
                     },
                     onFailure = { err ->
                         bundle.wipeZeroize()
@@ -1723,7 +2132,9 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         bytesTransferred: Long,
         manifestOverride: EncryptedFileManifest? = null,
         decryptedBytesOverride: ByteArray? = null,
-        failureReason: String? = null
+        failureReason: String? = null,
+        uploadProgressFraction: Float? = null,
+        bodyTextOverride: String? = null
     ) {
         _uiState.update { ui ->
             val list = ui.richMessagesByOnion[onionAddress] ?: return@update ui
@@ -1736,13 +2147,15 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                         Arrays.fill(prev.decryptedInMemoryBytes, 0.toByte())
                     }
                     msg.copy(
+                        bodyText = bodyTextOverride ?: msg.bodyText,
                         fileTransfer = prev.copy(
                             manifest = manifestOverride ?: prev.manifest,
                             state = state,
                             chunksProcessed = chunksProcessed,
                             bytesTransferred = bytesTransferred,
                             decryptedInMemoryBytes = decryptedBytesOverride ?: prev.decryptedInMemoryBytes,
-                            failureReason = failureReason
+                            failureReason = failureReason,
+                            uploadProgressFraction = uploadProgressFraction ?: prev.uploadProgressFraction
                         )
                     )
                 } else {
@@ -1780,6 +2193,59 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     if (idx >= 0) {
                         currentRich[idx] = currentRich[idx].copy(reactionEmoji = decoded.emoji.ifBlank { null })
                         changed = true
+                    }
+                }
+
+                is E2eeChatEnvelope.Decoded.Delete -> {
+                    val idx = currentRich.indexOfFirst { it.id == decoded.targetMsgId }
+                    if (idx >= 0) {
+                        currentRich[idx].wipeFromRam()
+                        val wasOwn = currentRich[idx].isOutgoing
+                        currentRich[idx] = currentRich[idx].copy(
+                            bodyText = if (wasOwn) {
+                                isHi("आपने यह संदेश सभी के लिए हटा दिया", "You deleted this message")
+                            } else {
+                                isHi("यह संदेश हटा दिया गया", "This message was deleted")
+                            },
+                            payloadKind = MessagePayloadKind.TEXT,
+                            fileTransfer = null,
+                            reactionEmoji = null,
+                            voiceDurationSeconds = null,
+                            isDeletedPlaceholder = true
+                        )
+                        changed = true
+                    }
+                }
+
+                is E2eeChatEnvelope.Decoded.Profile -> {
+                    if (!vm.isOutgoing) {
+                        val updatedContacts = _uiState.value.verifiedContacts.map { c ->
+                            if (c.onionAddress.equals(onionAddress, ignoreCase = true)) {
+                                val nextAlias = if (c.alias.startsWith("Peer-") && decoded.displayName.isNotBlank()) {
+                                    decoded.displayName
+                                } else {
+                                    c.alias
+                                }
+                                c.copy(
+                                    alias = nextAlias,
+                                    bio = decoded.bio,
+                                    avatarBytes = decoded.avatarBytes ?: c.avatarBytes
+                                )
+                            } else c
+                        }
+                        saveEncryptedContactsToDisk(updatedContacts)
+                        val refreshedPeer = updatedContacts.firstOrNull { it.onionAddress.equals(onionAddress, ignoreCase = true) }
+                        _uiState.update { state ->
+                            state.copy(
+                                verifiedContacts = updatedContacts,
+                                activePeerContact = if (state.activePeerContact?.onionAddress?.equals(onionAddress, ignoreCase = true) == true) {
+                                    refreshedPeer ?: state.activePeerContact
+                                } else state.activePeerContact,
+                                inspectedProfileContact = if (state.inspectedProfileContact?.onionAddress?.equals(onionAddress, ignoreCase = true) == true) {
+                                    refreshedPeer ?: state.inspectedProfileContact
+                                } else state.inspectedProfileContact
+                            )
+                        }
                     }
                 }
 
@@ -1885,10 +2351,15 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             val previews = state.lastMessagePreviewByOnion.toMutableMap()
             val times = state.lastMessageTimeByOnion.toMutableMap()
             if (lastMsg != null) {
-                val previewStr = when (lastMsg.payloadKind) {
-                    MessagePayloadKind.VOICE_NOTE -> "🎤 Voice Note (${lastMsg.voiceDurationSeconds ?: 1}s)"
-                    MessagePayloadKind.IMAGE, MessagePayloadKind.VIDEO, MessagePayloadKind.DOCUMENT, MessagePayloadKind.AUDIO_FILE ->
-                        "📎 ${lastMsg.fileTransfer?.manifest?.sanitizedFileName ?: lastMsg.bodyText}"
+                val previewStr = when {
+                    lastMsg.isDeletedPlaceholder -> "🚫 ${lastMsg.bodyText}"
+                    lastMsg.payloadKind == MessagePayloadKind.VOICE_NOTE -> "🎤 Voice Note (${lastMsg.voiceDurationSeconds ?: 1}s)"
+                    lastMsg.payloadKind in setOf(
+                        MessagePayloadKind.IMAGE,
+                        MessagePayloadKind.VIDEO,
+                        MessagePayloadKind.DOCUMENT,
+                        MessagePayloadKind.AUDIO_FILE
+                    ) -> "📎 ${lastMsg.fileTransfer?.manifest?.sanitizedFileName ?: lastMsg.bodyText}"
                     else -> lastMsg.bodyText
                 }
                 previews[onionAddress] = previewStr
@@ -1900,6 +2371,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 lastMessageTimeByOnion = times
             )
         }
+        persistVaultIfForeverMode()
     }
 
     fun triggerManualPqBraidRatchetStep() {
@@ -2076,6 +2548,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                         }
                     )
                 }
+                persistVaultIfForeverMode()
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(errorBannerMessage = "Could not publish status media: ${e.message}")
@@ -2388,6 +2861,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 statusBannerMessage = "Ephemeral status payload zeroized from RAM."
             )
         }
+        persistVaultIfForeverMode()
     }
 
     fun setStatusPrivacyPolicy(policy: StatusPrivacyPolicy) {
@@ -2800,6 +3274,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 statusBannerMessage = bannerText
             )
         }
+        persistVaultIfForeverMode()
     }
 
     fun clearVolatileCallHistory() {
@@ -2809,6 +3284,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 statusBannerMessage = "Volatile call log cleared from RAM."
             )
         }
+        persistVaultIfForeverMode()
     }
 
     // -------------------------------------------------------------------------
@@ -2829,6 +3305,11 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         val wipedCount = TorOnionTransportManager.emergencyDisconnectAndWipe()
         SessionService.stopServiceAndWipe(appContext)
         SecureWindowManager.scrubClipboardNow(appContext)
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            synchronized(vaultPersistLock) {
+                keystoreManager.wipeWrappedChatVault()
+            }
+        }
 
         _uiState.update {
             it.copy(
@@ -2862,6 +3343,11 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         MediaExportAndOpenHelper.shredAllEphemeralOpenCache(appContext)
         _uiState.value.ephemeralStatuses.forEach { it.wipeFromRam() }
         SecureWindowManager.scrubClipboardNow(appContext)
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            synchronized(vaultPersistLock) {
+                keystoreManager.wipeWrappedChatVault()
+            }
+        }
         _uiState.update {
             it.copy(
                 richMessagesByOnion = emptyMap(),
@@ -2872,7 +3358,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 activeViewingStatuses = emptyList(),
                 activeViewingStatusIndex = 0,
                 callHistory = emptyList(),
-                statusBannerMessage = "All volatile chat buffers, decrypted attachments, statuses & call logs wiped from RAM."
+                statusBannerMessage = "All volatile chat buffers, decrypted attachments, statuses, vault & call logs wiped."
             )
         }
     }
@@ -2912,14 +3398,35 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun setLanguage(language: AppLanguage) {
         _uiState.update { it.copy(language = language) }
+        persistPrefsToKeystore()
     }
 
     fun setSessionTimeoutSeconds(seconds: Long) {
-        _uiState.update { it.copy(sessionTimeoutSeconds = seconds.coerceIn(60L, 1800L)) }
+        val forever = seconds <= 0L
+        val normalized = if (forever) 0L else seconds.coerceIn(60L, 1800L)
+        TorOnionTransportManager.preserveVaultOnTaskRemoved = forever
+        _uiState.update {
+            it.copy(
+                foreverVaultEnabled = forever,
+                sessionTimeoutSeconds = normalized,
+                disappearingMessageTimerSec = normalized
+            )
+        }
+        persistPrefsToKeystore()
+        if (forever) {
+            persistVaultIfForeverMode()
+        } else {
+            viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                synchronized(vaultPersistLock) {
+                    keystoreManager.wipeWrappedChatVault()
+                }
+            }
+        }
     }
 
     fun setAutoLockOnBackground(enabled: Boolean) {
         _uiState.update { it.copy(autoLockOnBackground = enabled) }
+        persistPrefsToKeystore()
     }
 
     fun deleteLocalIdentityPermanently() {
@@ -2955,10 +3462,72 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         _uiState.update { it.copy(statusBannerMessage = null, errorBannerMessage = null) }
     }
 
+    private fun persistPrefsToKeystore() {
+        val check = _uiState.value
+        if (check.identitySummary == null && !keystoreManager.hasStoredIdentity()) return
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            synchronized(vaultPersistLock) {
+                val state = _uiState.value
+                if (state.identitySummary == null && !keystoreManager.hasStoredIdentity()) return@synchronized
+                val snapshot = PersistedPrefsSnapshot(
+                    profile = state.localProfile,
+                    foreverVaultEnabled = state.foreverVaultEnabled,
+                    sessionTimeoutSeconds = state.sessionTimeoutSeconds,
+                    disappearingMessageTimerSec = state.disappearingMessageTimerSec,
+                    biometricAppLockEnabled = state.biometricAppLockEnabled,
+                    flagSecureEnabled = state.flagSecureEnabled,
+                    autoLockOnBackground = state.autoLockOnBackground,
+                    readReceiptsEnabled = state.readReceiptsEnabled,
+                    typingIndicatorsEnabled = state.typingIndicatorsEnabled,
+                    metadataMinimizedMode = state.metadataMinimizedMode,
+                    themeModeName = state.themeMode.name,
+                    accentPaletteName = state.accentPalette.name,
+                    wallpaperStyleName = state.wallpaperStyle.name,
+                    languageCode = state.language.code,
+                    pinnedOnions = state.pinnedOnions,
+                    mutedOnions = state.mutedOnions,
+                    archivedOnions = state.archivedOnions,
+                    blockedOnions = state.blockedOnions
+                )
+                val encoded = EncryptedVaultCodec.encodePrefsAndProfile(snapshot)
+                try {
+                    keystoreManager.saveWrappedPrefsAndProfile(encoded)
+                } finally {
+                    Arrays.fill(encoded, 0.toByte())
+                }
+            }
+        }
+    }
+
+    private fun persistVaultIfForeverMode() {
+        val check = _uiState.value
+        if (!check.foreverVaultEnabled || check.identitySummary == null) return
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            synchronized(vaultPersistLock) {
+                val state = _uiState.value
+                if (!state.foreverVaultEnabled || state.identitySummary == null) return@synchronized
+                val snapshot = PersistedChatVaultSnapshot(
+                    richMessagesByOnion = state.richMessagesByOnion,
+                    lastMessagePreviewByOnion = state.lastMessagePreviewByOnion,
+                    lastMessageTimeByOnion = state.lastMessageTimeByOnion,
+                    unreadCountByOnion = state.unreadCountByOnion,
+                    callHistory = state.callHistory,
+                    ephemeralStatuses = state.ephemeralStatuses
+                )
+                val encoded = EncryptedVaultCodec.encodeChatVault(snapshot)
+                try {
+                    keystoreManager.saveWrappedChatVault(encoded)
+                } finally {
+                    Arrays.fill(encoded, 0.toByte())
+                }
+            }
+        }
+    }
+
     private fun saveEncryptedContactsToDisk(contacts: List<VerifiedContactRecord>) {
         val baos = ByteArrayOutputStream()
         DataOutputStream(baos).use { out ->
-            out.writeInt(0x5A544332) // "ZTC2"
+            out.writeInt(0x5A544333) // "ZTC3"
             out.writeInt(contacts.size)
             for (c in contacts) {
                 out.writeUTF(c.alias)
@@ -2973,6 +3542,14 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 out.write(c.x25519PublicKey)
                 out.writeUTF(c.pairingNonceHex)
                 out.writeLong(c.verifiedAtEpochSec)
+                out.writeUTF(c.bio.take(160))
+                val avatar = c.avatarBytes
+                if (avatar != null && avatar.isNotEmpty() && avatar.size <= 65_536) {
+                    out.writeInt(avatar.size)
+                    out.write(avatar)
+                } else {
+                    out.writeInt(0)
+                }
             }
         }
         val bytes = baos.toByteArray()
@@ -2992,7 +3569,9 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
 
         try {
             DataInputStream(ByteArrayInputStream(raw)).use { inp ->
-                if (inp.readInt() != 0x5A544332) return emptyList()
+                val magic = inp.readInt()
+                if (magic != 0x5A544332 && magic != 0x5A544333) return emptyList()
+                val hasProfileFields = (magic == 0x5A544333)
                 val count = inp.readInt().coerceIn(0, 500)
                 val list = ArrayList<VerifiedContactRecord>(count)
                 for (i in 0 until count) {
@@ -3008,6 +3587,11 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     val xPk = ByteArray(xLen).also { inp.readFully(it) }
                     val nonceHex = inp.readUTF()
                     val verifiedAt = inp.readLong()
+                    val bio = if (hasProfileFields) inp.readUTF() else ""
+                    val avatarBytes = if (hasProfileFields) {
+                        val len = inp.readInt().coerceIn(0, 65_536)
+                        if (len > 0) ByteArray(len).also { inp.readFully(it) } else null
+                    } else null
                     list.add(
                         VerifiedContactRecord(
                             alias = alias,
@@ -3021,7 +3605,9 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                             mlDsa87PublicKey = null,
                             mlKem1024EncapsKey = null,
                             pairingNonceHex = nonceHex,
-                            verifiedAtEpochSec = verifiedAt
+                            verifiedAtEpochSec = verifiedAt,
+                            bio = bio,
+                            avatarBytes = avatarBytes
                         )
                     )
                 }

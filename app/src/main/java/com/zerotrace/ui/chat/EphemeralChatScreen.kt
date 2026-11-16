@@ -150,6 +150,7 @@ fun EphemeralChatScreen(
     onReplySelected: (RichConversationMessage?) -> Unit,
     onReactMessage: (RichConversationMessage, String) -> Unit,
     onDeleteMessageFromRam: (RichConversationMessage) -> Unit,
+    onDeleteMessageForEveryone: (RichConversationMessage) -> Unit = {},
     onInspectMessageInfo: (RichConversationMessage?) -> Unit,
     onOpenMediaPreview: (RichConversationMessage) -> Unit,
     onSaveMediaToGallery: (RichConversationMessage) -> Unit = {},
@@ -337,6 +338,7 @@ fun EphemeralChatScreen(
                                 alias = peerContact?.alias ?: "Peer",
                                 onionAddress = peerContact?.onionAddress ?: "peer.onion",
                                 isOnlineOrSessionActive = isSessionLive,
+                                avatarBytes = peerContact?.avatarBytes,
                                 size = 40.dp
                             )
                             Spacer(modifier = Modifier.width(10.dp))
@@ -634,6 +636,7 @@ fun EphemeralChatScreen(
                             onReplyClick = { onReplySelected(it) },
                             onReactClick = { target, emoji -> onReactMessage(target, emoji) },
                             onDeleteFromRamClick = { onDeleteMessageFromRam(it) },
+                            onDeleteForEveryoneClick = { onDeleteMessageForEveryone(it) },
                             onInspectInfoClick = { onInspectMessageInfo(it) },
                             onMediaPreviewClick = { onOpenMediaPreview(it) },
                             onSaveMediaClick = { onSaveMediaToGallery(it) },

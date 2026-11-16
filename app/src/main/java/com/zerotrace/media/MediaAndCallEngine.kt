@@ -75,6 +75,49 @@ data class LoadedRamMedia(
  */
 object MediaRamLoader {
 
+    data class UriPreviewMeta(
+        val fileName: String,
+        val mimeType: String,
+        val estimatedSizeBytes: Int
+    )
+
+    fun peekUriMeta(
+        context: Context,
+        uri: Uri,
+        kind: MessagePayloadKind
+    ): UriPreviewMeta {
+        val resolver = context.contentResolver
+        var displayName = when (kind) {
+            MessagePayloadKind.IMAGE -> "photo_${System.currentTimeMillis() % 10000}.jpg"
+            MessagePayloadKind.VIDEO -> "video_${System.currentTimeMillis() % 10000}.mp4"
+            MessagePayloadKind.AUDIO_FILE -> "audio_${System.currentTimeMillis() % 10000}.m4a"
+            else -> "document_${System.currentTimeMillis() % 10000}.pdf"
+        }
+        var reportedSize = 0
+        try {
+            resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (nameIdx >= 0) {
+                        cursor.getString(nameIdx)?.takeIf { it.isNotBlank() }?.let { displayName = it }
+                    }
+                    if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) {
+                        reportedSize = cursor.getLong(sizeIdx).coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        val rawMime = resolver.getType(uri)?.lowercase() ?: when (kind) {
+            MessagePayloadKind.IMAGE -> "image/jpeg"
+            MessagePayloadKind.VIDEO -> "video/mp4"
+            MessagePayloadKind.AUDIO_FILE -> "audio/mpeg"
+            else -> "application/octet-stream"
+        }
+        return UriPreviewMeta(displayName, rawMime, reportedSize)
+    }
+
     fun loadUriToRam(
         context: Context,
         uri: Uri,

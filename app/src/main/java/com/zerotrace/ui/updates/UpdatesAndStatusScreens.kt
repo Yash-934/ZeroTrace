@@ -103,6 +103,7 @@ import com.zerotrace.bridge.EphemeralStatusItem
 import com.zerotrace.bridge.PublicIdentitySummary
 import com.zerotrace.bridge.StatusMediaType
 import com.zerotrace.bridge.StatusPrivacyPolicy
+import com.zerotrace.bridge.VerifiedContactRecord
 import com.zerotrace.media.MediaExportAndOpenHelper
 import com.zerotrace.network.ConnectivityState
 import com.zerotrace.ui.AppLanguage
@@ -126,6 +127,8 @@ import kotlinx.coroutines.delay
 fun ZeroTraceUpdatesTabScreen(
     language: AppLanguage,
     identitySummary: PublicIdentitySummary?,
+    localAvatarBytes: ByteArray? = null,
+    verifiedContacts: List<VerifiedContactRecord> = emptyList(),
     connectivityState: ConnectivityState,
     torProgress: Int,
     statuses: List<EphemeralStatusItem>,
@@ -333,6 +336,7 @@ fun ZeroTraceUpdatesTabScreen(
                             hasActiveStatusRing = ownStatuses.isNotEmpty(),
                             statusSegmentCount = ownStatuses.size,
                             unseenStatusSegmentCount = ownStatuses.size,
+                            avatarBytes = localAvatarBytes,
                             size = 52.dp
                         )
                         Spacer(modifier = Modifier.width(12.dp))
@@ -424,8 +428,13 @@ fun ZeroTraceUpdatesTabScreen(
                 }
             } else {
                 items(recentPeerGroups, key = { "recent_${it.first().authorOnion}" }) { group ->
+                    val authorOnion = group.first().authorOnion
+                    val authorAvatar = verifiedContacts.firstOrNull {
+                        it.onionAddress.equals(authorOnion, ignoreCase = true)
+                    }?.avatarBytes
                     SegmentedAuthorStatusRow(
                         group = group,
+                        avatarBytes = authorAvatar,
                         onClick = {
                             val firstUnread = group.firstOrNull { !it.viewedByLocalUser } ?: group.first()
                             onOpenStatusViewer(firstUnread)
@@ -444,8 +453,13 @@ fun ZeroTraceUpdatesTabScreen(
                     )
                 }
                 items(viewedPeerGroups, key = { "viewed_${it.first().authorOnion}" }) { group ->
+                    val authorOnion = group.first().authorOnion
+                    val authorAvatar = verifiedContacts.firstOrNull {
+                        it.onionAddress.equals(authorOnion, ignoreCase = true)
+                    }?.avatarBytes
                     SegmentedAuthorStatusRow(
                         group = group,
+                        avatarBytes = authorAvatar,
                         onClick = { onOpenStatusViewer(group.first()) }
                     )
                 }
@@ -457,6 +471,7 @@ fun ZeroTraceUpdatesTabScreen(
 @Composable
 private fun SegmentedAuthorStatusRow(
     group: List<EphemeralStatusItem>,
+    avatarBytes: ByteArray? = null,
     onClick: () -> Unit
 ) {
     val latest = group.maxByOrNull { it.createdAtEpochMillis } ?: return
@@ -475,6 +490,7 @@ private fun SegmentedAuthorStatusRow(
             hasActiveStatusRing = true,
             statusSegmentCount = group.size,
             unseenStatusSegmentCount = unseenCount,
+            avatarBytes = avatarBytes,
             size = 52.dp
         )
         Spacer(modifier = Modifier.width(12.dp))
@@ -690,6 +706,8 @@ fun ZeroTraceStatusViewerScreen(
     statuses: List<EphemeralStatusItem>,
     currentIndex: Int,
     fallbackStatus: EphemeralStatusItem?,
+    localAvatarBytes: ByteArray? = null,
+    verifiedContacts: List<VerifiedContactRecord> = emptyList(),
     onStepStatus: (Int) -> Unit,
     onBack: () -> Unit,
     onReplyToStatus: (EphemeralStatusItem, String) -> Unit,
@@ -913,10 +931,18 @@ fun ZeroTraceStatusViewerScreen(
                                 )
                             }
                             Spacer(modifier = Modifier.width(2.dp))
+                            val viewerAvatarBytes = if (statusItem.isOwnStatus) {
+                                localAvatarBytes
+                            } else {
+                                verifiedContacts.firstOrNull {
+                                    it.onionAddress.equals(statusItem.authorOnion, ignoreCase = true)
+                                }?.avatarBytes
+                            }
                             ContactAvatar(
                                 alias = statusItem.authorAlias,
                                 onionAddress = statusItem.authorOnion,
                                 isVerified = false,
+                                avatarBytes = viewerAvatarBytes,
                                 size = 38.dp
                             )
                             Spacer(modifier = Modifier.width(10.dp))

@@ -1,10 +1,18 @@
 package com.zerotrace.ui.settings
 
+import android.graphics.BitmapFactory
+import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,14 +24,19 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccessTime
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.QrCode
@@ -40,6 +53,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -52,19 +66,27 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.zerotrace.bridge.LocalUserProfile
 import com.zerotrace.bridge.PublicIdentitySummary
 import com.zerotrace.network.ConnectivityState
 import com.zerotrace.network.TorTransportBackend
+import com.zerotrace.security.BiometricAuthHelper
+import com.zerotrace.security.BiometricCapability
 import com.zerotrace.security.HardwareSecurityLevel
 import com.zerotrace.ui.AppLanguage
 import com.zerotrace.ui.ZeroTraceScreen
+import com.zerotrace.ui.components.ContactAvatar
 import com.zerotrace.ui.theme.AccentPalette
 import com.zerotrace.ui.theme.AppThemeMode
 import com.zerotrace.ui.theme.ChatWallpaperStyle
@@ -79,24 +101,30 @@ import com.zerotrace.ui.theme.ZeroTracePalette
 fun ZeroTraceSettingsScreen(
     language: AppLanguage,
     identitySummary: PublicIdentitySummary?,
+    localProfile: LocalUserProfile = LocalUserProfile(),
     connectivityState: ConnectivityState,
     torProgress: Int,
     themeMode: AppThemeMode,
     accentPalette: AccentPalette,
     wallpaperStyle: ChatWallpaperStyle,
+    foreverVaultEnabled: Boolean = true,
     sessionTimeoutSeconds: Long,
     autoLockOnBackground: Boolean,
+    biometricAppLockEnabled: Boolean = false,
     flagSecureEnabled: Boolean,
     transportBackend: TorTransportBackend,
     volatileMessagesInRamCount: Int,
     volatileStatusesInRamCount: Int,
     volatileCallsInRamCount: Int,
+    onUpdateLocalProfile: (String, String, Uri?, Boolean) -> Unit = { _, _, _, _ -> },
     onSelectThemeMode: (AppThemeMode) -> Unit,
     onSelectAccentPalette: (AccentPalette) -> Unit,
     onSelectWallpaperStyle: (ChatWallpaperStyle) -> Unit,
     onSelectLanguage: (AppLanguage) -> Unit,
+    onToggleForeverVault: (Boolean) -> Unit = {},
     onSelectTimeoutSeconds: (Long) -> Unit,
     onToggleAutoLock: (Boolean) -> Unit,
+    onRequestToggleBiometric: (Boolean) -> Unit = {},
     onToggleFlagSecure: (Boolean) -> Unit,
     onSelectTransportBackend: (TorTransportBackend) -> Unit,
     onWipeVolatileCaches: () -> Unit,
@@ -105,8 +133,11 @@ fun ZeroTraceSettingsScreen(
     onNavigate: (ZeroTraceScreen) -> Unit,
     onBack: () -> Unit
 ) {
+    val context = LocalContext.current
     val isHi = language == AppLanguage.HINDI
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
+    var showEditProfileDialog by remember { mutableStateOf(false) }
+    val biometricCapability = remember { BiometricAuthHelper.checkCapability(context) }
 
     val chipColors = FilterChipDefaults.filterChipColors(
         selectedContainerColor = MaterialTheme.colorScheme.primary,
@@ -114,6 +145,19 @@ fun ZeroTraceSettingsScreen(
         containerColor = MaterialTheme.colorScheme.surfaceVariant,
         labelColor = MaterialTheme.colorScheme.onSurface
     )
+
+    if (showEditProfileDialog) {
+        EditLocalProfileDialog(
+            initialProfile = localProfile,
+            onionAddress = identitySummary?.onionAddress ?: "local.onion",
+            isHi = isHi,
+            onSave = { name, bio, avatarUri, removePhoto ->
+                showEditProfileDialog = false
+                onUpdateLocalProfile(name, bio, avatarUri, removePhoto)
+            },
+            onDismiss = { showEditProfileDialog = false }
+        )
+    }
 
     if (showDeleteConfirmDialog) {
         AlertDialog(
@@ -204,14 +248,91 @@ fun ZeroTraceSettingsScreen(
                 .verticalScroll(rememberScrollState())
                 .testTag("settings_screen")
         ) {
+            // WhatsApp-style Editable User Profile Header Card
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showEditProfileDialog = true }
+                    .padding(horizontal = 20.dp, vertical = 14.dp)
+                    .testTag("settings_profile_header"),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box {
+                    ContactAvatar(
+                        alias = localProfile.displayName,
+                        onionAddress = identitySummary?.onionAddress ?: "local.onion",
+                        isVerified = true,
+                        avatarBytes = localProfile.avatarJpegBytes,
+                        size = 62.dp
+                    )
+                    Surface(
+                        color = MaterialTheme.colorScheme.primary,
+                        shape = CircleShape,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .size(22.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Default.CameraAlt,
+                                contentDescription = "Change Profile Photo",
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(12.dp)
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = localProfile.displayName,
+                        style = MaterialTheme.typography.titleLarge.copy(
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        ),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = localProfile.bio.ifBlank {
+                            if (isHi) "बायो और प्रोफ़ाइल फ़ोटो सेट करने के लिए टैप करें" else "Tap to set your bio & profile photo"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                IconButton(
+                    onClick = { showEditProfileDialog = true },
+                    modifier = Modifier.testTag("settings_edit_profile_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "Edit Profile",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+                IconButton(onClick = { onNavigate(ZeroTraceScreen.MY_IDENTITY) }) {
+                    Icon(
+                        imageVector = Icons.Default.QrCode,
+                        contentDescription = "My Pairing QR Code",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f))
+
             // Top Flat WhatsApp-style Rows matching Mockup Screen 8
             SettingsNavRow(
                 icon = Icons.Default.Info,
                 title = if (isHi) "गोपनीयता और सुरक्षा" else "Privacy & Security",
                 subtitle = if (isHi) {
-                    "एंड-टू-एंड एन्क्रिप्शन, TOR रूटिंग, गायब होने वाले संदेश"
+                    "एंड-टू-एंड एन्क्रिप्शन, TOR रूटिंग, फ़िंगरप्रिंट लॉक"
                 } else {
-                    "End-to-end encryption, TOR routing, disappearing messages"
+                    "End-to-end encryption, TOR routing, biometric lock & vault"
                 },
                 onClick = { onNavigate(ZeroTraceScreen.PRIVACY_CENTER) },
                 modifier = Modifier.testTag("open_privacy_center_card")
@@ -219,8 +340,12 @@ fun ZeroTraceSettingsScreen(
 
             SettingsNavRow(
                 icon = Icons.Default.Timer,
-                title = if (isHi) "गायब होने वाले संदेश" else "Disappearing Messages",
-                subtitle = "Default: ${sessionTimeoutSeconds / 60} minutes • ${if (autoLockOnBackground) "On" else "Off"}",
+                title = if (isHi) "सत्र और गायब होने वाले संदेश" else "Session Retention & Disappearing",
+                subtitle = if (foreverVaultEnabled || sessionTimeoutSeconds <= 0L) {
+                    if (isHi) "फ़ॉरेवर एन्क्रिप्टेड वॉल्ट (Keystore AES-256-GCM)" else "Forever Encrypted Vault • Keystore AES-256-GCM"
+                } else {
+                    "Ephemeral timeout: ${sessionTimeoutSeconds / 60} min • Auto-wipe: ${if (autoLockOnBackground) "On" else "Off"}"
+                },
                 onClick = { onNavigate(ZeroTraceScreen.PRIVACY_CENTER) }
             )
 
@@ -326,27 +451,105 @@ fun ZeroTraceSettingsScreen(
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f))
 
-            // Session Timeout & Screen Security
-            SettingsSectionCard(title = "SESSION TIMEOUT & SCREEN SECURITY") {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(60L to "1 min", 300L to "5 min", 900L to "15 min").forEach { (sec, label) ->
+            // Session Retention, Biometric Lock & Screen Security
+            SettingsSectionCard(icon = Icons.Default.Lock, title = "FOREVER VAULT, BIOMETRIC LOCK & SCREEN SECURITY") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (isHi) "फ़ॉरेवर सत्र (एन्क्रिप्टेड वॉल्ट)" else "Forever Session (Encrypted Vault)",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+                        )
+                        Text(
+                            text = if (foreverVaultEnabled) {
+                                "Active: Old chats & sessions stay safely persisted under Keystore AES-256-GCM across restarts."
+                            } else {
+                                "Off: Volatile RAM-only mode wipes chats after idle timeout or app close."
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Switch(
+                        checked = foreverVaultEnabled,
+                        onCheckedChange = onToggleForeverVault,
+                        modifier = Modifier.testTag("forever_vault_switch")
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(0L to "Forever", 60L to "1 min", 300L to "5 min", 900L to "15 min").forEach { (sec, label) ->
+                        val isSelected = if (sec == 0L) {
+                            foreverVaultEnabled || sessionTimeoutSeconds <= 0L
+                        } else {
+                            !foreverVaultEnabled && sessionTimeoutSeconds == sec
+                        }
                         FilterChip(
-                            selected = sessionTimeoutSeconds == sec,
+                            selected = isSelected,
                             onClick = { onSelectTimeoutSeconds(sec) },
                             label = { Text(label, style = MaterialTheme.typography.labelSmall) },
                             shape = RoundedCornerShape(50),
                             border = null,
-                            colors = chipColors
+                            colors = chipColors,
+                            modifier = Modifier.testTag("timeout_chip_$sec")
                         )
                     }
                 }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Fingerprint,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isHi) "फ़िंगरप्रिंट / बायोमेट्रिक ऐप लॉक" else "Fingerprint / Biometric App Lock",
+                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+                            )
+                        }
+                        Text(
+                            text = when (biometricCapability) {
+                                is BiometricCapability.Unavailable -> biometricCapability.reason
+                                else -> "Hardware BiometricPrompt locks ZeroTrace on launch & background resume."
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (biometricCapability is BiometricCapability.Unavailable) {
+                                CrimsonDanger
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Switch(
+                        checked = biometricAppLockEnabled,
+                        onCheckedChange = onRequestToggleBiometric,
+                        modifier = Modifier.testTag("settings_biometric_lock_switch")
+                    )
+                }
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = if (isHi) "ऐप बैकग्राउंड होने पर तुरंत सत्र मिटाएं" else "Wipe volatile sessions when app backgrounds",
+                        text = if (isHi) "ऐप बैकग्राउंड होने पर सत्र मिटाएं" else "Wipe volatile sessions when app backgrounds",
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.weight(1f)
                     )
@@ -655,14 +858,17 @@ fun ZeroTracePrivacyCenterScreen(
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f))
 
-            SettingsSectionCard(title = "DISAPPEARING SESSION TIMER") {
+            SettingsSectionCard(title = "DISAPPEARING & FOREVER VAULT TIMER") {
                 Text(
-                    text = "Maximum inactivity duration before volatile sessions and attachments are zeroized:",
+                    text = "Choose Forever Encrypted Vault (no auto-wipe) or a strict inactivity auto-purge timer:",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(60L to "1 min", 300L to "5 min", 900L to "15 min").forEach { (sec, label) ->
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(0L to "Forever", 60L to "1 min", 300L to "5 min", 900L to "15 min").forEach { (sec, label) ->
                         FilterChip(
                             selected = disappearingTimerSec == sec,
                             onClick = { onSelectDisappearingTimer(sec) },
@@ -761,3 +967,149 @@ private fun SettingsSectionCard(
     }
 }
 
+@Composable
+private fun EditLocalProfileDialog(
+    initialProfile: LocalUserProfile,
+    onionAddress: String,
+    isHi: Boolean,
+    onSave: (displayName: String, bio: String, avatarUri: Uri?, removePhoto: Boolean) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    var nameDraft by remember { mutableStateOf(initialProfile.displayName) }
+    var bioDraft by remember { mutableStateOf(initialProfile.bio) }
+    var pickedAvatarUri by remember { mutableStateOf<Uri?>(null) }
+    var removePhoto by remember { mutableStateOf(false) }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            pickedAvatarUri = uri
+            removePhoto = false
+        }
+    }
+
+    val previewBitmap = remember(pickedAvatarUri) {
+        pickedAvatarUri?.let { uri ->
+            try {
+                context.contentResolver.openInputStream(uri)?.use { stream ->
+                    BitmapFactory.decodeStream(stream)?.asImageBitmap()
+                }
+            } catch (_: Throwable) {
+                null
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = if (isHi) "प्रोफ़ाइल संपादित करें" else "Edit Encrypted Profile",
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+            )
+        },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(86.dp)
+                        .clip(CircleShape)
+                        .clickable {
+                            photoPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (previewBitmap != null) {
+                        Image(
+                            bitmap = previewBitmap,
+                            contentDescription = "Selected Profile Photo",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        ContactAvatar(
+                            alias = nameDraft.ifBlank { "ZeroTrace User" },
+                            onionAddress = onionAddress,
+                            isVerified = false,
+                            avatarBytes = if (removePhoto) null else initialProfile.avatarJpegBytes,
+                            size = 86.dp
+                        )
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            photoPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
+                        },
+                        modifier = Modifier.testTag("profile_pick_photo_button")
+                    ) {
+                        Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(if (isHi) "फ़ोटो चुनें" else "Choose Photo", style = MaterialTheme.typography.labelSmall)
+                    }
+                    if (!removePhoto && (pickedAvatarUri != null || initialProfile.avatarJpegBytes != null)) {
+                        TextButton(
+                            onClick = {
+                                pickedAvatarUri = null
+                                removePhoto = true
+                            }
+                        ) {
+                            Text("Remove", color = CrimsonDanger, style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = nameDraft,
+                    onValueChange = { if (it.length <= 48) nameDraft = it },
+                    label = { Text(if (isHi) "आपका नाम" else "Display Name") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("profile_name_input")
+                )
+
+                OutlinedTextField(
+                    value = bioDraft,
+                    onValueChange = { if (it.length <= 160) bioDraft = it },
+                    label = { Text(if (isHi) "बायो / स्टेटस" else "Bio / About") },
+                    maxLines = 3,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("profile_bio_input")
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    onSave(
+                        nameDraft.trim().ifEmpty { "ZeroTrace User" },
+                        bioDraft.trim(),
+                        pickedAvatarUri,
+                        removePhoto
+                    )
+                },
+                modifier = Modifier.testTag("profile_save_button")
+            ) {
+                Text(if (isHi) "सहेजें" else "Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(if (isHi) "रद्द करें" else "Cancel")
+            }
+        }
+    )
+}

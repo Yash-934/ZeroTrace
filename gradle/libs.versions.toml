@@ -44,6 +44,7 @@ bouncycastle = "1.79"
 zxingCore = "3.5.3"
 torAndroid = "0.4.8.16.1"
 jtorctl = "0.4.5.7"
+biometric = "1.1.0"
 
 
 [libraries]
@@ -102,6 +103,7 @@ bouncycastle-pqc = { group = "org.bouncycastle", name = "bcprov-jdk18on", versio
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxingCore" }
 tor-android = { group = "info.guardianproject", name = "tor-android", version.ref = "torAndroid" }
 jtorctl = { group = "info.guardianproject", name = "jtorctl", version.ref = "jtorctl" }
+androidx-biometric = { group = "androidx.biometric", name = "biometric", version.ref = "biometric" }
 
 
 [plugins]

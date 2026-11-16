@@ -35,6 +35,8 @@ class KeystoreManager(private val context: Context) {
         private const val MASTER_KEY_ALIAS = "zerotrace_identity_wrap_key_v2"
         private const val IDENTITY_FILE_NAME = "identity_envelope_v2.bin"
         private const val CONTACTS_FILE_NAME = "contacts_envelope_v2.bin"
+        private const val PREFS_PROFILE_FILE_NAME = "prefs_profile_envelope_v2.bin"
+        private const val CHAT_VAULT_FILE_NAME = "chat_vault_envelope_v2.bin"
         private const val ENVELOPE_MAGIC = 0x5A543245 // "ZT2E"
         private const val GCM_IV_LENGTH = 12
         private const val GCM_TAG_BITS = 128
@@ -197,16 +199,59 @@ class KeystoreManager(private val context: Context) {
         return unwrapBytes(file.readBytes(), aad)
     }
 
+    fun saveWrappedPrefsAndProfile(serialized: ByteArray) {
+        val aad = "ZT2-WRAPPED-PREFS-PROFILE-V2".toByteArray(Charsets.UTF_8)
+        val wrapped = wrapBytes(serialized, aad)
+        File(context.noBackupFilesDir, PREFS_PROFILE_FILE_NAME).writeBytes(wrapped)
+    }
+
+    fun loadWrappedPrefsAndProfile(): ByteArray? {
+        val file = File(context.noBackupFilesDir, PREFS_PROFILE_FILE_NAME)
+        if (!file.exists()) return null
+        val aad = "ZT2-WRAPPED-PREFS-PROFILE-V2".toByteArray(Charsets.UTF_8)
+        return unwrapBytes(file.readBytes(), aad)
+    }
+
+    fun saveWrappedChatVault(serializedVault: ByteArray) {
+        val aad = "ZT2-WRAPPED-CHAT-VAULT-V2".toByteArray(Charsets.UTF_8)
+        val wrapped = wrapBytes(serializedVault, aad)
+        File(context.noBackupFilesDir, CHAT_VAULT_FILE_NAME).writeBytes(wrapped)
+    }
+
+    fun loadWrappedChatVault(): ByteArray? {
+        val file = File(context.noBackupFilesDir, CHAT_VAULT_FILE_NAME)
+        if (!file.exists()) return null
+        val aad = "ZT2-WRAPPED-CHAT-VAULT-V2".toByteArray(Charsets.UTF_8)
+        return unwrapBytes(file.readBytes(), aad)
+    }
+
+    @Synchronized
+    fun wipeWrappedChatVault() {
+        val file = File(context.noBackupFilesDir, CHAT_VAULT_FILE_NAME)
+        if (file.exists()) {
+            val len = file.length().toInt().coerceAtMost(2 * 1024 * 1024)
+            if (len > 0) {
+                file.writeBytes(ByteArray(len))
+            }
+            file.delete()
+        }
+    }
+
     /**
-     * Permanently deletes wrapped identity and contact files, overwrites their bytes on disk best-effort,
-     * and deletes the master wrapping key from AndroidKeyStore.
+     * Permanently deletes wrapped identity, contacts, prefs/profile, and chat vault files,
+     * overwrites their bytes on disk best-effort, and deletes the master wrapping key from AndroidKeyStore.
      */
     @Synchronized
     fun deleteIdentityAndWrappingKey() {
-        listOf(IDENTITY_FILE_NAME, CONTACTS_FILE_NAME).forEach { fileName ->
+        listOf(
+            IDENTITY_FILE_NAME,
+            CONTACTS_FILE_NAME,
+            PREFS_PROFILE_FILE_NAME,
+            CHAT_VAULT_FILE_NAME
+        ).forEach { fileName ->
             val file = File(context.noBackupFilesDir, fileName)
             if (file.exists()) {
-                val len = file.length().toInt().coerceAtMost(1024 * 1024)
+                val len = file.length().toInt().coerceAtMost(2 * 1024 * 1024)
                 if (len > 0) {
                     file.writeBytes(ByteArray(len))
                 }

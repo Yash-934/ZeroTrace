@@ -225,17 +225,18 @@ object EmbeddedTorEngine {
     private fun applyFastTorRuntimeConf(conn: TorControlConnection) {
         // Tune Tor 0.4.8 for faster mobile cross-network & cellular/5G CGNAT rendezvous:
         // - Prefer IPv4 ORPorts (avoids 30s+ IPv6 CGNAT connect stalls on mobile data)
-        // - Disable dormancy & keep circuits warm for rapid .onion dial and HS descriptor publish
+        // - Tight CircuitBuildTimeout + SocksTimeout so stalled intro/HSDir circuits fail-fast & retry immediately
         val fastSettings = listOf(
             "ClientUseIPv4 1",
             "ClientPreferIPv6ORPort 0",
             "LearnCircuitBuildTimeout 0",
-            "CircuitBuildTimeout 18",
+            "CircuitBuildTimeout 10",
+            "NewCircuitPeriod 15",
             "NumEntryGuards 2",
             "DormantOnFirstStartup 0",
             "DormantCanceledByStartup 1",
-            "KeepalivePeriod 30",
-            "SocksTimeout 45"
+            "KeepalivePeriod 25",
+            "SocksTimeout 20"
         )
         try {
             conn.setConf(fastSettings)

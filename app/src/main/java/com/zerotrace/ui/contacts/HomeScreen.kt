@@ -685,6 +685,7 @@ fun ContactProfileScreen(
                         alias = contact.alias,
                         onionAddress = contact.onionAddress,
                         isVerified = !contact.identityChangedWarning,
+                        avatarBytes = contact.avatarBytes,
                         size = 86.dp
                     )
                     Spacer(modifier = Modifier.height(10.dp))
@@ -708,6 +709,16 @@ fun ContactProfileScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    if (contact.bio.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = contact.bio,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
 
                     Spacer(modifier = Modifier.height(14.dp))
 
@@ -919,7 +930,11 @@ fun ContactProfileScreen(
                                 )
                             }
                             Text(
-                                text = "${disappearingTimerSec / 60} min",
+                                text = if (disappearingTimerSec <= 0L) {
+                                    "Forever (Encrypted Vault)"
+                                } else {
+                                    "${disappearingTimerSec / 60} min"
+                                },
                                 style = MonospaceStyle.copy(fontSize = 12.sp),
                                 color = MaterialTheme.colorScheme.secondary
                             )

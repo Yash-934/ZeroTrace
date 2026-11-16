@@ -87,6 +87,13 @@ data class PublicIdentitySummary(
     val mlKem1024EncapsKey: ByteArray
 )
 
+data class LocalUserProfile(
+    val displayName: String = "ZeroTrace User",
+    val bio: String = "Encrypted via Post-Quantum Tor v3",
+    val avatarJpegBytes: ByteArray? = null,
+    val updatedAtEpochSec: Long = System.currentTimeMillis() / 1000L
+)
+
 /**
  * Verified or pending contact record (never stores private keys).
  */
@@ -103,7 +110,9 @@ data class VerifiedContactRecord(
     val mlKem1024EncapsKey: ByteArray?,
     val pairingNonceHex: String,
     val verifiedAtEpochSec: Long,
-    val identityChangedWarning: Boolean = false
+    val identityChangedWarning: Boolean = false,
+    val bio: String = "",
+    val avatarBytes: ByteArray? = null
 )
 
 /**

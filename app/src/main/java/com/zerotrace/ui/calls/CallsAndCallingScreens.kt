@@ -276,6 +276,7 @@ fun ZeroTraceCallsTabScreen(
                                 ContactAvatar(
                                     alias = contact.alias,
                                     onionAddress = contact.onionAddress,
+                                    avatarBytes = contact.avatarBytes,
                                     size = 46.dp
                                 )
                                 Spacer(modifier = Modifier.width(12.dp))
@@ -355,7 +356,10 @@ fun ZeroTraceCallsTabScreen(
                     )
                 }
                 items(filteredHistory, key = { it.callId }) { entry ->
-                    CallHistoryRow(entry = entry)
+                    val matchedAvatar = verifiedContacts.firstOrNull {
+                        it.onionAddress.equals(entry.peerOnion, ignoreCase = true)
+                    }?.avatarBytes
+                    CallHistoryRow(entry = entry, avatarBytes = matchedAvatar)
                 }
             }
         }
@@ -363,7 +367,10 @@ fun ZeroTraceCallsTabScreen(
 }
 
 @Composable
-private fun CallHistoryRow(entry: VolatileCallHistoryEntry) {
+private fun CallHistoryRow(
+    entry: VolatileCallHistoryEntry,
+    avatarBytes: ByteArray? = null
+) {
     val formatter = remember { SimpleDateFormat("hh:mm a", Locale.getDefault()) }
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
@@ -377,6 +384,7 @@ private fun CallHistoryRow(entry: VolatileCallHistoryEntry) {
                 ContactAvatar(
                     alias = entry.peerAlias,
                     onionAddress = entry.peerOnion,
+                    avatarBytes = avatarBytes,
                     size = 44.dp
                 )
                 Spacer(modifier = Modifier.width(12.dp))
@@ -422,6 +430,7 @@ private fun CallHistoryRow(entry: VolatileCallHistoryEntry) {
 @Composable
 fun ZeroTraceVoiceCallScreen(
     callState: ActiveCallUiState?,
+    peerAvatarBytes: ByteArray? = null,
     onToggleMute: () -> Unit,
     onToggleSpeaker: () -> Unit,
     onUpgradeToVideo: () -> Unit,
@@ -497,6 +506,7 @@ fun ZeroTraceVoiceCallScreen(
                         alias = callState.peerAlias,
                         onionAddress = callState.peerOnion,
                         isOnlineOrSessionActive = callState.protocolState == CallProtocolState.CONNECTED_ENCRYPTED_TOR_STREAM,
+                        avatarBytes = peerAvatarBytes,
                         size = 112.dp
                     )
                     Spacer(modifier = Modifier.height(18.dp))
@@ -579,6 +589,7 @@ fun ZeroTraceVoiceCallScreen(
 @Composable
 fun ZeroTraceVideoCallScreen(
     callState: ActiveCallUiState?,
+    peerAvatarBytes: ByteArray? = null,
     remoteVideoFrame: Bitmap? = null,
     onLocalCameraFrame: (ImageProxy, Boolean) -> Unit = { img, _ -> img.close() },
     onToggleMute: () -> Unit,
@@ -724,6 +735,7 @@ fun ZeroTraceVideoCallScreen(
                             alias = callState.peerAlias,
                             onionAddress = callState.peerOnion,
                             isOnlineOrSessionActive = callState.protocolState == CallProtocolState.CONNECTED_ENCRYPTED_TOR_STREAM,
+                            avatarBytes = peerAvatarBytes,
                             size = 40.dp
                         )
                         Spacer(modifier = Modifier.width(10.dp))
@@ -778,6 +790,7 @@ fun ZeroTraceVideoCallScreen(
                             ContactAvatar(
                                 alias = callState.peerAlias,
                                 onionAddress = callState.peerOnion,
+                                avatarBytes = peerAvatarBytes,
                                 size = 96.dp
                             )
                             Spacer(modifier = Modifier.height(14.dp))
@@ -960,6 +973,7 @@ fun ZeroTraceVideoCallScreen(
 @Composable
 fun ZeroTraceIncomingCallScreen(
     callState: ActiveCallUiState?,
+    peerAvatarBytes: ByteArray? = null,
     onAcceptCall: () -> Unit,
     onDeclineCall: () -> Unit,
     onQuickMessageReply: () -> Unit
@@ -1006,6 +1020,7 @@ fun ZeroTraceIncomingCallScreen(
                     ContactAvatar(
                         alias = callState.peerAlias,
                         onionAddress = callState.peerOnion,
+                        avatarBytes = peerAvatarBytes,
                         size = 110.dp
                     )
                     Spacer(modifier = Modifier.height(16.dp))

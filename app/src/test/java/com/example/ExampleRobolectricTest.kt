@@ -80,4 +80,26 @@ class ExampleRobolectricTest {
         assertEquals(320, bitmap.width)
         assertEquals(320, bitmap.height)
     }
+
+    @Test
+    fun testKeystoreWrappedPrefsProfileAndForeverChatVault() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val keystoreManager = KeystoreManager(context)
+        val prefsBytes = "ZT2-PREFS-TEST-PAYLOAD".toByteArray(Charsets.UTF_8)
+        val vaultBytes = "ZT2-VAULT-TEST-PAYLOAD".toByteArray(Charsets.UTF_8)
+
+        keystoreManager.saveWrappedPrefsAndProfile(prefsBytes)
+        keystoreManager.saveWrappedChatVault(vaultBytes)
+
+        assertArrayEquals(prefsBytes, keystoreManager.loadWrappedPrefsAndProfile())
+        assertArrayEquals(vaultBytes, keystoreManager.loadWrappedChatVault())
+
+        // Wiping chat vault preserves prefs/profile while removing the chat vault envelope
+        keystoreManager.wipeWrappedChatVault()
+        assertNull(keystoreManager.loadWrappedChatVault())
+        assertArrayEquals(prefsBytes, keystoreManager.loadWrappedPrefsAndProfile())
+
+        keystoreManager.deleteIdentityAndWrappingKey()
+        assertNull(keystoreManager.loadWrappedPrefsAndProfile())
+    }
 }

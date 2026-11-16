@@ -128,6 +128,7 @@ dependencies {
   // Embedded Tor C daemon + Android lifecycle service + control socket library
   implementation(libs.tor.android)
   implementation(libs.jtorctl)
+  implementation(libs.androidx.biometric)
 
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
