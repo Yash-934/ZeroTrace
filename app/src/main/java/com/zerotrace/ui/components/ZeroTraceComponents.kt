@@ -1,8 +1,10 @@
 package com.zerotrace.ui.components
 
+import android.graphics.BitmapFactory
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -48,6 +50,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.NotificationsOff
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Search
@@ -55,6 +58,7 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SpeakerPhone
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Update
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Videocam
@@ -92,7 +96,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -741,13 +747,15 @@ fun ChatListItem(
 @Composable
 fun MessageBubble(
     message: RichConversationMessage,
+    playingVoiceMessageId: String? = null,
     onReplyClick: (RichConversationMessage) -> Unit,
     onReactClick: (RichConversationMessage, String) -> Unit,
     onDeleteFromRamClick: (RichConversationMessage) -> Unit,
     onInspectInfoClick: (RichConversationMessage) -> Unit,
     onAcceptFileTransfer: ((String) -> Unit)? = null,
     onRejectFileTransfer: ((String) -> Unit)? = null,
-    onMediaPreviewClick: ((RichConversationMessage) -> Unit)? = null
+    onMediaPreviewClick: ((RichConversationMessage) -> Unit)? = null,
+    onVoicePlayToggle: ((RichConversationMessage) -> Unit)? = null
 ) {
     var actionMenuExpanded by remember { mutableStateOf(false) }
     val timeFormatter = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
@@ -817,17 +825,28 @@ fun MessageBubble(
                                 Box(
                                     modifier = Modifier
                                         .width(3.dp)
-                                        .height(24.dp)
+                                        .height(32.dp)
                                         .background(ZeroTraceEmerald, RoundedCornerShape(2.dp))
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = message.replyToPreview,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                Column {
+                                    if (!message.replyToSenderLabel.isNullOrBlank()) {
+                                        Text(
+                                            text = message.replyToSenderLabel,
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = ZeroTraceEmerald,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    Text(
+                                        text = message.replyToPreview,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
                         }
                     }
@@ -848,19 +867,67 @@ fun MessageBubble(
                                     .padding(bottom = 6.dp)
                             ) {
                                 Column(modifier = Modifier.padding(10.dp)) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        val icon = when (message.payloadKind) {
-                                            MessagePayloadKind.IMAGE -> Icons.Default.Image
-                                            MessagePayloadKind.VIDEO -> Icons.Default.Videocam
-                                            MessagePayloadKind.AUDIO_FILE -> Icons.Default.AudioFile
-                                            else -> Icons.Default.Description
+                                    val decryptedBytes = transfer?.decryptedInMemoryBytes
+                                    val imageBitmap = if (message.payloadKind == MessagePayloadKind.IMAGE && decryptedBytes != null) {
+                                        remember(transfer.manifest.transferId, decryptedBytes.size) {
+                                            try {
+                                                BitmapFactory.decodeByteArray(decryptedBytes, 0, decryptedBytes.size)?.asImageBitmap()
+                                            } catch (_: Throwable) {
+                                                null
+                                            }
                                         }
-                                        Icon(
-                                            imageVector = icon,
-                                            contentDescription = message.payloadKind.name,
-                                            tint = ZeroTraceCyan,
-                                            modifier = Modifier.size(24.dp)
+                                    } else {
+                                        null
+                                    }
+
+                                    if (imageBitmap != null) {
+                                        Image(
+                                            bitmap = imageBitmap,
+                                            contentDescription = transfer?.manifest?.sanitizedFileName ?: "Encrypted Image",
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(190.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .clickable { onMediaPreviewClick?.invoke(message) }
                                         )
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                    }
+
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (message.payloadKind == MessagePayloadKind.AUDIO_FILE &&
+                                            decryptedBytes != null &&
+                                            onVoicePlayToggle != null
+                                        ) {
+                                            val isPlaying = playingVoiceMessageId == message.id
+                                            IconButton(
+                                                onClick = { onVoicePlayToggle(message) },
+                                                colors = IconButtonDefaults.iconButtonColors(
+                                                    containerColor = ZeroTraceEmerald,
+                                                    contentColor = Color.Black
+                                                ),
+                                                modifier = Modifier.size(36.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
+                                                    contentDescription = if (isPlaying) "Stop Audio" else "Play Audio",
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                            }
+                                        } else {
+                                            val icon = when (message.payloadKind) {
+                                                MessagePayloadKind.IMAGE -> Icons.Default.Image
+                                                MessagePayloadKind.VIDEO -> Icons.Default.Videocam
+                                                MessagePayloadKind.AUDIO_FILE -> Icons.Default.AudioFile
+                                                else -> Icons.Default.Description
+                                            }
+                                            Icon(
+                                                imageVector = icon,
+                                                contentDescription = message.payloadKind.name,
+                                                tint = ZeroTraceCyan,
+                                                modifier = Modifier.size(24.dp)
+                                            )
+                                        }
                                         Spacer(modifier = Modifier.width(8.dp))
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(
@@ -872,7 +939,7 @@ fun MessageBubble(
                                             )
                                             if (transfer != null) {
                                                 Text(
-                                                    text = "${transfer.manifest.totalSizeBytes / 1024} KiB • ${transfer.manifest.totalChunks} AEAD Chunks • SHA-256",
+                                                    text = "${(transfer.manifest.totalSizeBytes / 1024).coerceAtLeast(1)} KiB • ${transfer.manifest.totalChunks} AEAD Chunks • SHA-256",
                                                     style = MonospaceStyle.copy(fontSize = 10.sp),
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
@@ -955,34 +1022,64 @@ fun MessageBubble(
                         }
 
                         MessagePayloadKind.VOICE_NOTE -> {
+                            val isPlaying = playingVoiceMessageId == message.id
+                            val hasPlayableAudio = message.fileTransfer?.decryptedInMemoryBytes != null
                             Surface(
                                 color = Color.Black.copy(alpha = 0.25f),
                                 shape = RoundedCornerShape(10.dp),
+                                border = BorderStroke(1.dp, ZeroTraceEmerald.copy(alpha = if (isPlaying) 0.8f else 0.35f)),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(bottom = 6.dp)
+                                    .clickable(enabled = hasPlayableAudio) {
+                                        onVoicePlayToggle?.invoke(message)
+                                    }
                             ) {
                                 Row(
                                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.GraphicEq,
-                                        contentDescription = "Encrypted Voice Note",
-                                        tint = ZeroTraceEmerald,
-                                        modifier = Modifier.size(22.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Column {
-                                        Text(
-                                            text = "E2EE Voice Note (${message.voiceDurationSeconds ?: 4}s)",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.onSurface
+                                    IconButton(
+                                        onClick = { onVoicePlayToggle?.invoke(message) },
+                                        enabled = hasPlayableAudio,
+                                        colors = IconButtonDefaults.iconButtonColors(
+                                            containerColor = if (isPlaying) ZeroTraceRed else ZeroTraceEmerald,
+                                            contentColor = if (isPlaying) Color.White else Color.Black
+                                        ),
+                                        modifier = Modifier.size(40.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
+                                            contentDescription = if (isPlaying) "Stop Voice Note" else "Play Voice Note",
+                                            modifier = Modifier.size(22.dp)
                                         )
+                                    }
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = Icons.Default.GraphicEq,
+                                                contentDescription = null,
+                                                tint = ZeroTraceEmerald,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text(
+                                                text = "E2EE Voice Note (${message.voiceDurationSeconds ?: 1}s)",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                        }
                                         Text(
-                                            text = "Opus/PCM RAM-Only Stream • Zero Disk Cache",
+                                            text = if (isPlaying) {
+                                                "Playing decrypted RAM PCM stream…"
+                                            } else if (hasPlayableAudio) {
+                                                "Tap Play • ChaCha20-Poly1305 WAV (RAM)"
+                                            } else {
+                                                "Audio chunks unavailable in RAM"
+                                            },
                                             style = MonospaceStyle.copy(fontSize = 10.sp),
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            color = if (isPlaying) ZeroTraceCyan else MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
                                 }
@@ -1138,9 +1235,12 @@ fun MessageComposer(
     onCancelReply: () -> Unit,
     canSend: Boolean,
     isRecordingVoiceNote: Boolean,
+    recordingSeconds: Int = 0,
+    recordingAmplitude: Float = 0f,
     onSendClick: () -> Unit,
     onAttachmentSheetClick: () -> Unit,
     onToggleVoiceRecording: () -> Unit,
+    onCancelVoiceRecording: () -> Unit = {},
     onQuickCameraClick: () -> Unit
 ) {
     Surface(
@@ -1170,7 +1270,7 @@ fun MessageComposer(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "Replying to Ratchet #${replyingToMessage.ratchetStepIndex}",
+                                    text = "Replying to ${replyingToMessage.senderLabel} • Ratchet #${replyingToMessage.ratchetStepIndex}",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.primary
                                 )
@@ -1184,7 +1284,7 @@ fun MessageComposer(
                             }
                             IconButton(
                                 onClick = onCancelReply,
-                                modifier = Modifier.size(28.dp)
+                                modifier = Modifier.size(32.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Close,
@@ -1197,97 +1297,188 @@ fun MessageComposer(
                 }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(
-                    onClick = onAttachmentSheetClick,
-                    enabled = canSend,
-                    modifier = Modifier.testTag("composer_attach_button")
+            if (isRecordingVoiceNote) {
+                val mins = recordingSeconds / 60
+                val secs = recordingSeconds % 60
+                val timerText = String.format(Locale.US, "%02d:%02d", mins, secs)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.AttachFile,
-                        contentDescription = "Attach Encrypted File",
-                        tint = if (canSend) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                OutlinedTextField(
-                    value = draftText,
-                    onValueChange = onDraftChanged,
-                    enabled = canSend,
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("chat_message_input"),
-                    placeholder = {
-                        Text(
-                            text = if (isRecordingVoiceNote) {
-                                "Recording encrypted RAM voice note..."
-                            } else if (canSend) {
-                                "Encrypted message (RAM-only)..."
-                            } else {
-                                "Fail-closed: Tor E2EE required"
-                            },
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    },
-                    trailingIcon = {
-                        IconButton(
-                            onClick = onQuickCameraClick,
-                            enabled = canSend
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.CameraAlt,
-                                contentDescription = "Send Encrypted Photo",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    },
-                    singleLine = false,
-                    maxLines = 4,
-                    shape = RoundedCornerShape(24.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                        unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                    )
-                )
-
-                Spacer(modifier = Modifier.width(6.dp))
-
-                if (draftText.isNotBlank()) {
                     IconButton(
-                        onClick = onSendClick,
-                        enabled = canSend,
+                        onClick = onCancelVoiceRecording,
                         colors = IconButtonDefaults.iconButtonColors(
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = Color.Black
+                            containerColor = ZeroTraceRed.copy(alpha = 0.18f),
+                            contentColor = ZeroTraceRed
                         ),
                         modifier = Modifier
                             .size(48.dp)
-                            .testTag("send_message_button")
+                            .testTag("cancel_voice_recording_button")
                     ) {
                         Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Send,
-                            contentDescription = "Send Encrypted Message"
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "Discard Voice Recording"
                         )
                     }
-                } else {
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(24.dp),
+                        border = BorderStroke(1.dp, ZeroTraceRed.copy(alpha = 0.5f)),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(9.dp)
+                                            .clip(CircleShape)
+                                            .background(ZeroTraceRed)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "REC • $timerText",
+                                        style = MonospaceStyle.copy(fontSize = 12.sp, fontWeight = FontWeight.Bold),
+                                        color = ZeroTraceRed
+                                    )
+                                }
+                                Text(
+                                    text = "RAM PCM • Zero Disk",
+                                    style = MonospaceStyle.copy(fontSize = 10.sp),
+                                    color = ZeroTraceEmerald
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+                            LinearProgressIndicator(
+                                progress = { recordingAmplitude.coerceIn(0.08f, 1f) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(4.dp)
+                                    .clip(RoundedCornerShape(2.dp)),
+                                color = ZeroTraceEmerald,
+                                trackColor = Color.Black.copy(alpha = 0.35f)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
                     IconButton(
                         onClick = onToggleVoiceRecording,
-                        enabled = canSend,
                         colors = IconButtonDefaults.iconButtonColors(
-                            containerColor = if (isRecordingVoiceNote) ZeroTraceRed else MaterialTheme.colorScheme.primary,
-                            contentColor = if (isRecordingVoiceNote) Color.White else Color.Black
+                            containerColor = ZeroTraceEmerald,
+                            contentColor = Color.Black
                         ),
                         modifier = Modifier
                             .size(48.dp)
                             .testTag("voice_note_button")
                     ) {
                         Icon(
-                            imageVector = if (isRecordingVoiceNote) Icons.Default.Check else Icons.Default.Mic,
-                            contentDescription = if (isRecordingVoiceNote) "Finish & Send Voice Note" else "Record Encrypted Voice Note"
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Finish & Send Voice Note"
                         )
+                    }
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(
+                        onClick = onAttachmentSheetClick,
+                        enabled = canSend,
+                        modifier = Modifier.testTag("composer_attach_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AttachFile,
+                            contentDescription = "Attach Encrypted File",
+                            tint = if (canSend) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = draftText,
+                        onValueChange = onDraftChanged,
+                        enabled = canSend,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("chat_message_input"),
+                        placeholder = {
+                            Text(
+                                text = if (canSend) {
+                                    "Encrypted message (RAM-only)..."
+                                } else {
+                                    "Fail-closed: Tor E2EE required"
+                                },
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        },
+                        trailingIcon = {
+                            IconButton(
+                                onClick = onQuickCameraClick,
+                                enabled = canSend
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CameraAlt,
+                                    contentDescription = "Send Encrypted Photo",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        },
+                        singleLine = false,
+                        maxLines = 4,
+                        shape = RoundedCornerShape(24.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
+                        )
+                    )
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    if (draftText.isNotBlank()) {
+                        IconButton(
+                            onClick = onSendClick,
+                            enabled = canSend,
+                            colors = IconButtonDefaults.iconButtonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = Color.Black
+                            ),
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("send_message_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Send,
+                                contentDescription = "Send Encrypted Message"
+                            )
+                        }
+                    } else {
+                        IconButton(
+                            onClick = onToggleVoiceRecording,
+                            enabled = canSend,
+                            colors = IconButtonDefaults.iconButtonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = Color.Black
+                            ),
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("voice_note_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = "Record Encrypted Voice Note"
+                            )
+                        }
                     }
                 }
             }

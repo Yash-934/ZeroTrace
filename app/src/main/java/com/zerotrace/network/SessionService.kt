@@ -14,6 +14,8 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.R
+import com.zerotrace.bridge.CallMediaKind
+import com.zerotrace.bridge.EncryptedFileChunk
 import com.zerotrace.bridge.HandshakeInitWire
 import com.zerotrace.bridge.HandshakeResponseWire
 import com.zerotrace.bridge.PublicIdentitySummary
@@ -22,6 +24,7 @@ import com.zerotrace.bridge.RustCoreBridge
 import com.zerotrace.bridge.VerifiedContactRecord
 import com.zerotrace.bridge.VolatileChatMessage
 import com.zerotrace.bridge.toHex
+import com.zerotrace.media.EncryptedCallMediaEngine
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.ByteArrayInputStream
@@ -149,6 +152,41 @@ sealed interface PeerTransportEvent {
         val sessionIdHex: String,
         val msgNum: Long,
         val ratchetEpoch: Int
+    ) : PeerTransportEvent
+
+    data class IncomingCallInvite(
+        val peerOnion: String,
+        val callId: String,
+        val mediaKind: CallMediaKind,
+        val mediaTcpPort: Int,
+        val remoteHost: String?,
+        val ephemeralCallPubKey: ByteArray,
+        val ed25519Signature: ByteArray
+    ) : PeerTransportEvent
+
+    data class CallAccepted(
+        val peerOnion: String,
+        val callId: String,
+        val mediaKind: CallMediaKind,
+        val ephemeralCallPubKey: ByteArray,
+        val ed25519Signature: ByteArray
+    ) : PeerTransportEvent
+
+    data class CallRejected(
+        val peerOnion: String,
+        val callId: String,
+        val reason: String
+    ) : PeerTransportEvent
+
+    data class CallEnded(
+        val peerOnion: String,
+        val callId: String
+    ) : PeerTransportEvent
+
+    data class IncomingCallMediaFrame(
+        val peerOnion: String,
+        val callId: String,
+        val frameBytes: ByteArray
     ) : PeerTransportEvent
 }
 
@@ -313,7 +351,13 @@ object TorOnionTransportManager {
     private const val FRAME_RATCHET_PACKET: Byte = 0x03
     private const val FRAME_DELIVERY_ACK: Byte = 0x04
     private const val FRAME_SESSION_RESET: Byte = 0x05
+    private const val FRAME_MEDIA_CHUNK: Byte = 0x06
     private const val FRAME_PEER_HELLO: Byte = 0x10
+    private const val FRAME_CALL_INVITE: Byte = 0x20
+    private const val FRAME_CALL_ACCEPT: Byte = 0x21
+    private const val FRAME_CALL_REJECT: Byte = 0x22
+    private const val FRAME_CALL_END: Byte = 0x23
+    private const val FRAME_CALL_MEDIA_FALLBACK: Byte = 0x24
 
     private const val DEFAULT_P2P_TCP_PORT = 9443
     private const val DEFAULT_P2P_UDP_PORT = 19443
@@ -374,6 +418,7 @@ object TorOnionTransportManager {
     private val pendingHandshakeByOnion = ConcurrentHashMap<String, CompletableDeferred<Long>>()
     private val discoveredPeerAddresses = ConcurrentHashMap<String, InetSocketAddress>()
     private val connectingEndpoints = ConcurrentHashMap.newKeySet<String>()
+    private val incomingMediaChunksByTransferId = ConcurrentHashMap<String, ConcurrentHashMap<Int, EncryptedFileChunk>>()
 
     private val isAndroidDeviceRuntime: Boolean = try {
         Build.VERSION.SDK_INT > 0 && !Build.FINGERPRINT.equals("robolectric", ignoreCase = true)
@@ -1006,6 +1051,83 @@ object TorOnionTransportManager {
             }
         }
 
+        fun sendMediaChunk(transferId: String, chunk: EncryptedFileChunk) {
+            synchronized(writeLock) {
+                out.writeInt(WIRE_MAGIC)
+                out.writeByte(FRAME_MEDIA_CHUNK.toInt())
+                out.writeUTF(transferId)
+                out.writeInt(chunk.chunkIndex)
+                writeBytes(out, chunk.nonce12)
+                writeBytes(out, chunk.ciphertextWithTag)
+                out.flush()
+            }
+        }
+
+        fun sendCallInviteFrame(
+            callId: String,
+            mediaKind: CallMediaKind,
+            mediaTcpPort: Int,
+            ephemeralCallPubKey: ByteArray,
+            ed25519Sig: ByteArray
+        ) {
+            synchronized(writeLock) {
+                out.writeInt(WIRE_MAGIC)
+                out.writeByte(FRAME_CALL_INVITE.toInt())
+                out.writeUTF(callId)
+                out.writeUTF(mediaKind.name)
+                out.writeInt(mediaTcpPort)
+                writeBytes(out, ephemeralCallPubKey)
+                writeBytes(out, ed25519Sig)
+                out.flush()
+            }
+        }
+
+        fun sendCallAcceptFrame(
+            callId: String,
+            mediaKind: CallMediaKind,
+            ephemeralCallPubKey: ByteArray,
+            ed25519Sig: ByteArray
+        ) {
+            synchronized(writeLock) {
+                out.writeInt(WIRE_MAGIC)
+                out.writeByte(FRAME_CALL_ACCEPT.toInt())
+                out.writeUTF(callId)
+                out.writeUTF(mediaKind.name)
+                writeBytes(out, ephemeralCallPubKey)
+                writeBytes(out, ed25519Sig)
+                out.flush()
+            }
+        }
+
+        fun sendCallRejectFrame(callId: String, reason: String) {
+            synchronized(writeLock) {
+                out.writeInt(WIRE_MAGIC)
+                out.writeByte(FRAME_CALL_REJECT.toInt())
+                out.writeUTF(callId)
+                out.writeUTF(reason)
+                out.flush()
+            }
+        }
+
+        fun sendCallEndFrame(callId: String) {
+            synchronized(writeLock) {
+                out.writeInt(WIRE_MAGIC)
+                out.writeByte(FRAME_CALL_END.toInt())
+                out.writeUTF(callId)
+                out.flush()
+            }
+        }
+
+        fun sendCallMediaFallbackFrame(callId: String, frameBytes: ByteArray) {
+            synchronized(writeLock) {
+                out.writeInt(WIRE_MAGIC)
+                out.writeByte(FRAME_CALL_MEDIA_FALLBACK.toInt())
+                out.writeUTF(callId)
+                writeBytes(out, frameBytes)
+                out.flush()
+            }
+        }
+
         fun closeQuietly() {
             try {
                 socket.close()
@@ -1125,6 +1247,80 @@ object TorOnionTransportManager {
                             }
                         }
                     }
+                    FRAME_MEDIA_CHUNK -> {
+                        val transferId = inp.readUTF()
+                        val chunkIdx = inp.readInt()
+                        val nonce12 = readBytes(inp)
+                        val ct = readBytes(inp)
+                        val chunkMap = incomingMediaChunksByTransferId.getOrPut(transferId) { ConcurrentHashMap() }
+                        chunkMap[chunkIdx] = EncryptedFileChunk(chunkIdx, nonce12, ct)
+                    }
+                    FRAME_CALL_INVITE -> {
+                        val callId = inp.readUTF()
+                        val kind = try {
+                            CallMediaKind.valueOf(inp.readUTF())
+                        } catch (_: Exception) {
+                            CallMediaKind.AUDIO
+                        }
+                        val mediaTcpPort = inp.readInt()
+                        val ephemPub = readBytes(inp)
+                        val sig = readBytes(inp)
+                        val transcript = "ZT2-CALL-INVITE-V1|$callId|$peerOnion|${kind.name}|$mediaTcpPort|${ephemPub.toHex()}"
+                            .toByteArray(Charsets.UTF_8)
+                        val verified = RustCoreBridge.verifyEd25519(channel.peerHello.ed25519PublicKey, transcript, sig)
+                        if (verified) {
+                            _peerTransportEvents.tryEmit(
+                                PeerTransportEvent.IncomingCallInvite(
+                                    peerOnion = peerOnion,
+                                    callId = callId,
+                                    mediaKind = kind,
+                                    mediaTcpPort = mediaTcpPort,
+                                    remoteHost = channel.remoteHostAddress,
+                                    ephemeralCallPubKey = ephemPub,
+                                    ed25519Signature = sig
+                                )
+                            )
+                        }
+                    }
+                    FRAME_CALL_ACCEPT -> {
+                        val callId = inp.readUTF()
+                        val kind = try {
+                            CallMediaKind.valueOf(inp.readUTF())
+                        } catch (_: Exception) {
+                            CallMediaKind.AUDIO
+                        }
+                        val ephemPub = readBytes(inp)
+                        val sig = readBytes(inp)
+                        val transcript = "ZT2-CALL-ACCEPT-V1|$callId|$peerOnion|${kind.name}|${ephemPub.toHex()}"
+                            .toByteArray(Charsets.UTF_8)
+                        val verified = RustCoreBridge.verifyEd25519(channel.peerHello.ed25519PublicKey, transcript, sig)
+                        if (verified) {
+                            _peerTransportEvents.tryEmit(
+                                PeerTransportEvent.CallAccepted(
+                                    peerOnion = peerOnion,
+                                    callId = callId,
+                                    mediaKind = kind,
+                                    ephemeralCallPubKey = ephemPub,
+                                    ed25519Signature = sig
+                                )
+                            )
+                        }
+                    }
+                    FRAME_CALL_REJECT -> {
+                        val callId = inp.readUTF()
+                        val reason = inp.readUTF()
+                        _peerTransportEvents.tryEmit(PeerTransportEvent.CallRejected(peerOnion, callId, reason))
+                    }
+                    FRAME_CALL_END -> {
+                        val callId = inp.readUTF()
+                        _peerTransportEvents.tryEmit(PeerTransportEvent.CallEnded(peerOnion, callId))
+                    }
+                    FRAME_CALL_MEDIA_FALLBACK -> {
+                        val callId = inp.readUTF()
+                        val frameBytes = readBytes(inp)
+                        EncryptedCallMediaEngine.processIncomingEncryptedMediaFrame(frameBytes)
+                        _peerTransportEvents.tryEmit(PeerTransportEvent.IncomingCallMediaFrame(peerOnion, callId, frameBytes))
+                    }
                     else -> break
                 }
             }
@@ -1133,8 +1329,12 @@ object TorOnionTransportManager {
             if (registeredChannel != null && peerOnion.isNotEmpty()) {
                 livePeerChannels.remove(peerOnion, registeredChannel)
                 refreshConnectedPeerState()
-                if (!isPeerConnectedOnMesh(peerOnion)) {
-                    _peerTransportEvents.tryEmit(PeerTransportEvent.PeerDisconnected(peerOnion))
+                val disconnectedOnion = peerOnion
+                scope.launch {
+                    delay(350L)
+                    if (!isPeerConnectedOnMesh(disconnectedOnion)) {
+                        _peerTransportEvents.tryEmit(PeerTransportEvent.PeerDisconnected(disconnectedOnion))
+                    }
                 }
             }
             try {
@@ -1617,6 +1817,108 @@ object TorOnionTransportManager {
         }
     }
 
+    suspend fun sendEncryptedMediaChunks(
+        peerOnion: String,
+        transferId: String,
+        chunks: List<EncryptedFileChunk>
+    ): Boolean = withContext(Dispatchers.IO) {
+        val channel = livePeerChannels[peerOnion.lowercase()]?.takeIf { it.isAlive() } ?: return@withContext false
+        return@withContext try {
+            for (chunk in chunks) {
+                channel.sendMediaChunk(transferId, chunk)
+            }
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    suspend fun awaitAndTakeMediaChunks(
+        transferId: String,
+        expectedChunks: Int,
+        timeoutMs: Long = 3500L
+    ): List<EncryptedFileChunk>? {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val map = incomingMediaChunksByTransferId[transferId]
+            if (map != null && map.size >= expectedChunks) {
+                incomingMediaChunksByTransferId.remove(transferId)
+                return (0 until expectedChunks).mapNotNull { map[it] }.takeIf { it.size == expectedChunks }
+            }
+            delay(50L)
+        }
+        val map = incomingMediaChunksByTransferId.remove(transferId) ?: return null
+        return (0 until expectedChunks).mapNotNull { map[it] }.takeIf { it.size == expectedChunks }
+    }
+
+    fun getPeerRemoteHostAddress(peerOnion: String): String? {
+        return livePeerChannels[peerOnion.lowercase()]?.remoteHostAddress
+    }
+
+    suspend fun sendCallInvite(
+        peerOnion: String,
+        callId: String,
+        mediaKind: CallMediaKind,
+        mediaTcpPort: Int,
+        ephemeralCallPubKey: ByteArray
+    ): Boolean = withContext(Dispatchers.IO) {
+        val channel = livePeerChannels[peerOnion.lowercase()]?.takeIf { it.isAlive() } ?: return@withContext false
+        val localOnion = RustCoreBridge.getPublicIdentitySummary()?.onionAddress?.lowercase() ?: return@withContext false
+        val transcript = "ZT2-CALL-INVITE-V1|$callId|$localOnion|${mediaKind.name}|$mediaTcpPort|${ephemeralCallPubKey.toHex()}"
+            .toByteArray(Charsets.UTF_8)
+        val sig = RustCoreBridge.signPeerHelloTranscript(transcript) ?: return@withContext false
+        return@withContext try {
+            channel.sendCallInviteFrame(callId, mediaKind, mediaTcpPort, ephemeralCallPubKey, sig)
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    suspend fun sendCallAccept(
+        peerOnion: String,
+        callId: String,
+        mediaKind: CallMediaKind,
+        ephemeralCallPubKey: ByteArray
+    ): Boolean = withContext(Dispatchers.IO) {
+        val channel = livePeerChannels[peerOnion.lowercase()]?.takeIf { it.isAlive() } ?: return@withContext false
+        val localOnion = RustCoreBridge.getPublicIdentitySummary()?.onionAddress?.lowercase() ?: return@withContext false
+        val transcript = "ZT2-CALL-ACCEPT-V1|$callId|$localOnion|${mediaKind.name}|${ephemeralCallPubKey.toHex()}"
+            .toByteArray(Charsets.UTF_8)
+        val sig = RustCoreBridge.signPeerHelloTranscript(transcript) ?: return@withContext false
+        return@withContext try {
+            channel.sendCallAcceptFrame(callId, mediaKind, ephemeralCallPubKey, sig)
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    fun sendCallReject(peerOnion: String, callId: String, reason: String) {
+        scope.launch {
+            try {
+                livePeerChannels[peerOnion.lowercase()]?.takeIf { it.isAlive() }?.sendCallRejectFrame(callId, reason)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    fun sendCallEnd(peerOnion: String, callId: String) {
+        scope.launch {
+            try {
+                livePeerChannels[peerOnion.lowercase()]?.takeIf { it.isAlive() }?.sendCallEndFrame(callId)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    fun sendCallMediaFallbackFrame(peerOnion: String, callId: String, frameBytes: ByteArray) {
+        try {
+            livePeerChannels[peerOnion.lowercase()]?.takeIf { it.isAlive() }?.sendCallMediaFallbackFrame(callId, frameBytes)
+        } catch (_: Throwable) {
+        }
+    }
+
     /**
      * Manual Emergency Lock / Disconnect Operation (Section 5.4).
      */
@@ -1624,6 +1926,12 @@ object TorOnionTransportManager {
     fun emergencyDisconnectAndWipe(): Int {
         _connectivityState.value = ConnectivityState.DISCONNECTING
         localBootId = UUID.randomUUID().toString().replace("-", "")
+        EncryptedCallMediaEngine.stopAndWipe()
+        incomingMediaChunksByTransferId.values.forEach { chunkMap ->
+            chunkMap.values.forEach { it.wipeZeroize() }
+            chunkMap.clear()
+        }
+        incomingMediaChunksByTransferId.clear()
         val wipedSessions = RustCoreBridge.emergencyWipeAllSessions()
         realPeerSessionHandles.clear()
         lastBootIdByOnion.clear()

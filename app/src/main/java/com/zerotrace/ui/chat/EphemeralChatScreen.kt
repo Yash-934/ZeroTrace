@@ -1,8 +1,19 @@
 package com.zerotrace.ui.chat
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,9 +33,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
@@ -52,22 +68,32 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.zerotrace.bridge.MessagePayloadKind
 import com.zerotrace.bridge.RichConversationMessage
 import com.zerotrace.bridge.SessionRatchetMetrics
@@ -86,6 +112,7 @@ import com.zerotrace.ui.theme.CyanAccent
 import com.zerotrace.ui.theme.EmeraldPrimary
 import com.zerotrace.ui.theme.MonospaceStyle
 import java.nio.charset.StandardCharsets
+import kotlinx.coroutines.launch
 
 /**
  * WhatsApp-Style Chat Conversation Screen (Screen 2 of Section 4)
@@ -109,6 +136,9 @@ fun EphemeralChatScreen(
     inspectedMessageInfo: RichConversationMessage?,
     showAttachmentSheet: Boolean,
     isRecordingVoiceNote: Boolean,
+    voiceRecordingSeconds: Int = 0,
+    voiceRecordingAmplitude: Float = 0f,
+    playingVoiceMessageId: String? = null,
     inChatSearchQuery: String,
     wallpaperStyle: ChatWallpaperStyle,
     statusBanner: String?,
@@ -122,6 +152,10 @@ fun EphemeralChatScreen(
     onOpenMediaPreview: (RichConversationMessage) -> Unit,
     onShowAttachmentSheet: (Boolean) -> Unit,
     onToggleVoiceRecording: () -> Unit,
+    onCancelVoiceRecording: () -> Unit = {},
+    onToggleVoicePlay: (RichConversationMessage) -> Unit = {},
+    onPickMediaUri: (Uri, MessagePayloadKind) -> Unit = { _, _ -> },
+    onCapturedCameraBitmap: (Bitmap) -> Unit = {},
     onSendEncryptedAttachment: (MessagePayloadKind, String, String, ByteArray, String) -> Unit,
     onStartVoiceCall: () -> Unit,
     onStartVideoCall: () -> Unit,
@@ -132,6 +166,8 @@ fun EphemeralChatScreen(
     onDisconnectAndWipeSession: () -> Unit
 ) {
     BackHandler(onBack = onBackToChats)
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val isSessionLive = (ratchetMetrics != null && isPeerMeshConnected) ||
         connectivityState == ConnectivityState.E2EE_SESSION_READY
     val isHi = language == AppLanguage.HINDI
@@ -139,6 +175,56 @@ fun EphemeralChatScreen(
     var searchVisible by remember { mutableStateOf(false) }
     var moreMenuExpanded by remember { mutableStateOf(false) }
     var showSecuritySheet by remember { mutableStateOf(false) }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            onPickMediaUri(uri, MessagePayloadKind.IMAGE)
+        }
+    }
+    val videoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            onPickMediaUri(uri, MessagePayloadKind.VIDEO)
+        }
+    }
+    val documentPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            onPickMediaUri(uri, MessagePayloadKind.DOCUMENT)
+        }
+    }
+    val audioPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            onPickMediaUri(uri, MessagePayloadKind.AUDIO_FILE)
+        }
+    }
+    val cameraCaptureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicturePreview()
+    ) { bitmap ->
+        if (bitmap != null) {
+            onCapturedCameraBitmap(bitmap)
+        }
+    }
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            cameraCaptureLauncher.launch(null)
+        }
+    }
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            onToggleVoiceRecording()
+        }
+    }
 
     val displayedMessages = remember(richMessages, inChatSearchQuery) {
         if (inChatSearchQuery.isBlank()) {
@@ -149,6 +235,47 @@ fun EphemeralChatScreen(
                     (it.fileTransfer?.manifest?.sanitizedFileName?.contains(inChatSearchQuery, ignoreCase = true) == true)
             }
         }
+    }
+
+    val listState = rememberLazyListState()
+    val totalItemsCount by remember { derivedStateOf { listState.layoutInfo.totalItemsCount } }
+    val isAtBottom by remember {
+        derivedStateOf {
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            totalItemsCount <= 2 || lastVisible >= (totalItemsCount - 2).coerceAtLeast(0)
+        }
+    }
+    var previousMsgCount by remember { mutableIntStateOf(displayedMessages.size) }
+    var unseenIncomingCount by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(Unit) {
+        if (displayedMessages.isNotEmpty()) {
+            listState.scrollToItem(displayedMessages.size + 1)
+        }
+    }
+
+    LaunchedEffect(isAtBottom) {
+        if (isAtBottom) {
+            unseenIncomingCount = 0
+        }
+    }
+
+    LaunchedEffect(displayedMessages.size) {
+        val newSize = displayedMessages.size
+        if (newSize > previousMsgCount) {
+            val added = displayedMessages.subList(previousMsgCount, newSize)
+            val lastIsOutgoing = added.lastOrNull()?.isOutgoing == true
+            if (isAtBottom || lastIsOutgoing) {
+                val targetIndex = (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+                listState.animateScrollToItem(targetIndex)
+                unseenIncomingCount = 0
+            } else {
+                unseenIncomingCount += added.count { !it.isOutgoing }.coerceAtLeast(1)
+            }
+        } else if (newSize < previousMsgCount) {
+            unseenIncomingCount = 0
+        }
+        previousMsgCount = newSize
     }
 
     if (inspectedMessageInfo != null) {
@@ -392,6 +519,12 @@ fun EphemeralChatScreen(
             }
 
             if (statusBanner != null) {
+                val showReconnectAction = !isSessionLive && (
+                    statusBanner.contains("disconnect", ignoreCase = true) ||
+                        statusBanner.contains("connect", ignoreCase = true) ||
+                        statusBanner.contains("waiting", ignoreCase = true) ||
+                        statusBanner.contains("कट", ignoreCase = true)
+                    )
                 Surface(
                     color = AmberWarning.copy(alpha = 0.16f),
                     modifier = Modifier.fillMaxWidth()
@@ -409,145 +542,183 @@ fun EphemeralChatScreen(
                             color = AmberWarning,
                             modifier = Modifier.weight(1f)
                         )
-                        TextButton(onClick = onReconnectPeer) {
-                            Text("Reconnect", color = EmeraldPrimary, fontWeight = FontWeight.Bold)
+                        if (showReconnectAction) {
+                            TextButton(onClick = onReconnectPeer) {
+                                Text("Reconnect", color = EmeraldPrimary, fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }
             }
 
-            // Messages List
-            LazyColumn(
+            // Messages List + Floating Scroll-to-Bottom Pill
+            Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
-                    .testTag("chat_message_list"),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                // WhatsApp-style E2EE Notice Banner at top of conversation
-                item {
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f),
-                        shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.35f)),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 6.dp)
-                            .clickable { showSecuritySheet = true }
-                            .testTag("chat_security_notice_banner")
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(12.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .testTag("chat_message_list"),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    // WhatsApp-style E2EE Notice Banner at top of conversation
+                    item {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.35f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 6.dp)
+                                .clickable { showSecuritySheet = true }
+                                .testTag("chat_security_notice_banner")
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Default.Lock,
-                                    contentDescription = null,
-                                    tint = EmeraldPrimary,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.Lock,
+                                        contentDescription = null,
+                                        tint = EmeraldPrimary,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = if (isHi) {
+                                            "पोस्ट-क्वांटम हाइब्रिड E2EE • केवल RAM सत्र"
+                                        } else {
+                                            "HYBRID PQ DOUBLE RATCHET • VOLATILE RAM ONLY"
+                                        },
+                                        style = MonospaceStyle.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
+                                        color = EmeraldPrimary
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = if (isHi) {
-                                        "पोस्ट-क्वांटम हाइब्रिड E2EE • केवल RAM सत्र"
-                                    } else {
-                                        "HYBRID PQ DOUBLE RATCHET • VOLATILE RAM ONLY"
-                                    },
-                                    style = MonospaceStyle.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
-                                    color = EmeraldPrimary
+                                    text = "Messages and attachments are encrypted with X25519 + ML-KEM-1024 + ChaCha20-Poly1305 over Tor v3 Onion streams. Nothing is written to SQLite or disk. Tap to inspect safety numbers.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "Messages and attachments are encrypted with X25519 + ML-KEM-1024 + ChaCha20-Poly1305 over Tor v3 Onion streams. Nothing is written to SQLite or disk. Tap to inspect safety numbers.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
                         }
                     }
-                }
 
-                // Date / Ephemeral Session Divider Pill
-                item {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                            shape = RoundedCornerShape(50)
+                    // Date / Ephemeral Session Divider Pill
+                    item {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = "TODAY • SESSION ${ratchetMetrics?.sessionIdHex?.take(8) ?: "LIVE"} • Tx:${ratchetMetrics?.sendCount ?: 0} Rx:${ratchetMetrics?.recvCount ?: 0}",
-                                style = MonospaceStyle.copy(fontSize = 10.sp),
-                                color = CyanAccent,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
-                            )
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = RoundedCornerShape(50)
+                            ) {
+                                Text(
+                                    text = "TODAY • SESSION ${ratchetMetrics?.sessionIdHex?.take(8) ?: "LIVE"} • Tx:${ratchetMetrics?.sendCount ?: 0} Rx:${ratchetMetrics?.recvCount ?: 0}",
+                                    style = MonospaceStyle.copy(fontSize = 10.sp),
+                                    color = CyanAccent,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                                )
+                            }
                         }
+                    }
+
+                    items(displayedMessages, key = { it.id }) { msg ->
+                        MessageBubble(
+                            message = msg,
+                            playingVoiceMessageId = playingVoiceMessageId,
+                            onReplyClick = { onReplySelected(it) },
+                            onReactClick = { target, emoji -> onReactMessage(target, emoji) },
+                            onDeleteFromRamClick = { onDeleteMessageFromRam(it) },
+                            onInspectInfoClick = { onInspectMessageInfo(it) },
+                            onMediaPreviewClick = { onOpenMediaPreview(it) },
+                            onVoicePlayToggle = onToggleVoicePlay
+                        )
                     }
                 }
 
-                items(displayedMessages, key = { it.id }) { msg ->
-                    MessageBubble(
-                        message = msg,
-                        onReplyClick = { onReplySelected(it) },
-                        onReactClick = { target, emoji -> onReactMessage(target, emoji) },
-                        onDeleteFromRamClick = { onDeleteMessageFromRam(it) },
-                        onInspectInfoClick = { onInspectMessageInfo(it) },
-                        onMediaPreviewClick = { onOpenMediaPreview(it) }
-                    )
+                // Floating Jump-to-Latest Pill when scrolled up
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = !isAtBottom || unseenIncomingCount > 0,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 16.dp, bottom = 14.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (unseenIncomingCount > 0) {
+                            Surface(
+                                color = EmeraldPrimary,
+                                shape = CircleShape,
+                                shadowElevation = 4.dp,
+                                modifier = Modifier.padding(end = 6.dp)
+                            ) {
+                                Text(
+                                    text = "$unseenIncomingCount",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = Color.Black,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                        SmallFloatingActionButton(
+                            onClick = {
+                                unseenIncomingCount = 0
+                                coroutineScope.launch {
+                                    val lastIdx = (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+                                    listState.animateScrollToItem(lastIdx)
+                                }
+                            },
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = EmeraldPrimary,
+                            modifier = Modifier.testTag("scroll_to_bottom_pill")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ArrowDownward,
+                                contentDescription = "Scroll to latest messages"
+                            )
+                        }
+                    }
                 }
             }
 
-            // Collapsible Attachment Picker Sheet
+            // Collapsible Attachment Picker Sheet -> launches real Android system pickers (Zero Disk Temp Files)
             AnimatedVisibility(visible = showAttachmentSheet) {
                 AttachmentPicker(
                     onPickPhoto = {
-                        val payload = "JFIF-EXIF-STRIPPED-ENCRYPTED-IMAGE-${System.nanoTime()}".toByteArray(StandardCharsets.UTF_8)
-                        onSendEncryptedAttachment(
-                            MessagePayloadKind.IMAGE,
-                            "clean_photo_${System.currentTimeMillis() % 1000}.jpg",
-                            "image/jpeg",
-                            payload,
-                            "Encrypted Photo (EXIF metadata stripped in RAM)"
+                        onShowAttachmentSheet(false)
+                        photoPickerLauncher.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                         )
                     },
                     onPickVideo = {
-                        val payload = "MP4-ENCRYPTED-VIDEO-STREAM-${System.nanoTime()}".toByteArray(StandardCharsets.UTF_8)
-                        onSendEncryptedAttachment(
-                            MessagePayloadKind.VIDEO,
-                            "clip_${System.currentTimeMillis() % 1000}.mp4",
-                            "video/mp4",
-                            payload,
-                            "Encrypted Video Clip (32 KiB AEAD chunks)"
+                        onShowAttachmentSheet(false)
+                        videoPickerLauncher.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
                         )
                     },
                     onPickDocument = {
-                        val payload = "PDF-ZERO-TRACE-AUDIT-REPORT-${System.nanoTime()}".toByteArray(StandardCharsets.UTF_8)
-                        onSendEncryptedAttachment(
-                            MessagePayloadKind.DOCUMENT,
-                            "security_brief_${System.currentTimeMillis() % 1000}.pdf",
-                            "application/pdf",
-                            payload,
-                            "Encrypted Document (SHA-256 verified)"
-                        )
+                        onShowAttachmentSheet(false)
+                        documentPickerLauncher.launch(arrayOf("*/*"))
                     },
                     onPickAudio = {
-                        val payload = "OPUS-AUDIO-ENCRYPTED-BUFFER-${System.nanoTime()}".toByteArray(StandardCharsets.UTF_8)
-                        onSendEncryptedAttachment(
-                            MessagePayloadKind.AUDIO_FILE,
-                            "audio_${System.currentTimeMillis() % 1000}.ogg",
-                            "audio/ogg",
-                            payload,
-                            "Encrypted Audio Attachment"
-                        )
+                        onShowAttachmentSheet(false)
+                        audioPickerLauncher.launch(arrayOf("audio/*"))
                     },
                     onPickContactCard = {
-                        val payload = "ZT2-SIGNED-PEER-CARD-${peerContact?.onionAddress}".toByteArray(StandardCharsets.UTF_8)
+                        onShowAttachmentSheet(false)
+                        val payload = ("ZT2-SIGNED-PEER-CARD|${peerContact?.alias ?: "Peer"}|" +
+                            "${peerContact?.onionAddress ?: ""}|${peerContact?.classicalSafetyDigits ?: ""}")
+                            .toByteArray(StandardCharsets.UTF_8)
                         onSendEncryptedAttachment(
                             MessagePayloadKind.CONTACT_CARD,
                             "verified_peer_card.txt",
@@ -560,7 +731,7 @@ fun EphemeralChatScreen(
                 )
             }
 
-            // WhatsApp-style Message Composer
+            // WhatsApp-style Message Composer with real Camera & AudioRecord permissions
             MessageComposer(
                 draftText = draftText,
                 onDraftChanged = { draftText = it },
@@ -568,6 +739,8 @@ fun EphemeralChatScreen(
                 onCancelReply = { onReplySelected(null) },
                 canSend = isSessionLive,
                 isRecordingVoiceNote = isRecordingVoiceNote,
+                recordingSeconds = voiceRecordingSeconds,
+                recordingAmplitude = voiceRecordingAmplitude,
                 onSendClick = {
                     val toSend = draftText.trim()
                     if (toSend.isNotEmpty()) {
@@ -576,16 +749,32 @@ fun EphemeralChatScreen(
                     }
                 },
                 onAttachmentSheetClick = { onShowAttachmentSheet(!showAttachmentSheet) },
-                onToggleVoiceRecording = onToggleVoiceRecording,
+                onToggleVoiceRecording = {
+                    if (isRecordingVoiceNote) {
+                        onToggleVoiceRecording()
+                    } else {
+                        val hasAudioPerm = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.RECORD_AUDIO
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (hasAudioPerm) {
+                            onToggleVoiceRecording()
+                        } else {
+                            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        }
+                    }
+                },
+                onCancelVoiceRecording = onCancelVoiceRecording,
                 onQuickCameraClick = {
-                    val payload = "CAMERA-RAM-CAPTURE-EXIF-STRIPPED-${System.nanoTime()}".toByteArray(StandardCharsets.UTF_8)
-                    onSendEncryptedAttachment(
-                        MessagePayloadKind.IMAGE,
-                        "camera_capture_${System.currentTimeMillis() % 1000}.jpg",
-                        "image/jpeg",
-                        payload,
-                        "Camera Capture (EXIF stripped, RAM-only)"
-                    )
+                    val hasCamPerm = ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.CAMERA
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (hasCamPerm) {
+                        cameraCaptureLauncher.launch(null)
+                    } else {
+                        cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                    }
                 }
             )
         }
@@ -727,24 +916,51 @@ fun EncryptedMediaPreviewScreen(
                         .fillMaxWidth()
                         .weight(1f)
                 ) {
+                    val decryptedBytes = transfer.decryptedInMemoryBytes
+                    val previewBitmap = if (message.payloadKind == MessagePayloadKind.IMAGE && decryptedBytes != null) {
+                        remember(transfer.manifest.transferId, decryptedBytes.size) {
+                            try {
+                                BitmapFactory.decodeByteArray(decryptedBytes, 0, decryptedBytes.size)?.asImageBitmap()
+                            } catch (_: Throwable) {
+                                null
+                            }
+                        }
+                    } else {
+                        null
+                    }
+
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(24.dp),
+                            .verticalScroll(rememberScrollState())
+                            .padding(20.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
-                        Icon(
-                            imageVector = if (message.payloadKind == MessagePayloadKind.IMAGE) {
-                                Icons.Default.Image
-                            } else {
-                                Icons.Default.Description
-                            },
-                            contentDescription = null,
-                            tint = EmeraldPrimary,
-                            modifier = Modifier.size(72.dp)
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
+                        if (previewBitmap != null) {
+                            Image(
+                                bitmap = previewBitmap,
+                                contentDescription = transfer.manifest.sanitizedFileName,
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(340.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                        } else {
+                            Icon(
+                                imageVector = if (message.payloadKind == MessagePayloadKind.IMAGE) {
+                                    Icons.Default.Image
+                                } else {
+                                    Icons.Default.Description
+                                },
+                                contentDescription = null,
+                                tint = EmeraldPrimary,
+                                modifier = Modifier.size(72.dp)
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                        }
                         Text(
                             text = transfer.manifest.sanitizedFileName,
                             style = MaterialTheme.typography.titleLarge

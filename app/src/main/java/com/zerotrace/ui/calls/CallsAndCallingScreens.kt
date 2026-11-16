@@ -1,10 +1,19 @@
 package com.zerotrace.ui.calls
 
 import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -32,6 +41,7 @@ import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.RingVolume
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.VerifiedUser
@@ -49,21 +59,30 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import java.util.concurrent.Executors
 import com.zerotrace.bridge.ActiveCallUiState
 import com.zerotrace.bridge.CallDirectionFilter
 import com.zerotrace.bridge.CallMediaKind
@@ -463,10 +482,36 @@ fun ZeroTraceVoiceCallScreen(
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Est. Tor Onion Circuit RTT: ~${callState.estimatedTorRttMs} ms • Opus Chunked AEAD",
+                        text = "Rx Audio: ${callState.remoteAudioPacketsReceived} AEAD frames • ChaCha20-Poly1305 • Ephemeral X25519",
                         style = MonospaceStyle.copy(fontSize = 11.sp),
-                        color = Color.White.copy(alpha = 0.7f)
+                        color = Color.White.copy(alpha = 0.72f),
+                        textAlign = TextAlign.Center
                     )
+                    if (callState.isRemoteMuted) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Surface(
+                            color = AmberWarning.copy(alpha = 0.2f),
+                            shape = RoundedCornerShape(50)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.MicOff,
+                                    contentDescription = null,
+                                    tint = AmberWarning,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "${callState.peerAlias} muted microphone",
+                                    style = MonospaceStyle.copy(fontSize = 10.sp),
+                                    color = AmberWarning
+                                )
+                            }
+                        }
+                    }
                 }
 
                 // Bottom Voice Call Controls
@@ -489,13 +534,25 @@ fun ZeroTraceVoiceCallScreen(
 @Composable
 fun ZeroTraceVideoCallScreen(
     callState: ActiveCallUiState?,
+    remoteVideoFrame: Bitmap? = null,
+    onLocalCameraFrame: (ImageProxy, Boolean) -> Unit = { img, _ -> img.close() },
     onToggleMute: () -> Unit,
     onToggleCamera: () -> Unit,
     onFlipCamera: () -> Unit,
     onEndCall: () -> Unit
 ) {
     BackHandler(onBack = onEndCall)
-    var permissionsGranted by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val currentFrameCallback by rememberUpdatedState(onLocalCameraFrame)
+    val currentFrontCamera by rememberUpdatedState(callState?.isFrontCamera ?: true)
+
+    var permissionsGranted by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED &&
+                ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        )
+    }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
@@ -504,8 +561,66 @@ fun ZeroTraceVideoCallScreen(
     }
 
     LaunchedEffect(Unit) {
-        permissionLauncher.launch(
-            arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+        if (!permissionsGranted) {
+            permissionLauncher.launch(
+                arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+            )
+        }
+    }
+
+    val previewView = remember {
+        PreviewView(context).apply {
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+        }
+    }
+    val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                ProcessCameraProvider.getInstance(context).get().unbindAll()
+            } catch (_: Throwable) {
+            }
+            cameraExecutor.shutdownNow()
+        }
+    }
+
+    val isCameraActive = permissionsGranted && (callState?.isCameraEnabled == true)
+    val isFront = callState?.isFrontCamera ?: true
+
+    LaunchedEffect(isCameraActive, isFront) {
+        val providerFuture = ProcessCameraProvider.getInstance(context)
+        providerFuture.addListener(
+            {
+                try {
+                    val provider = providerFuture.get()
+                    provider.unbindAll()
+                    if (!isCameraActive) return@addListener
+
+                    val selector = if (isFront) {
+                        CameraSelector.DEFAULT_FRONT_CAMERA
+                    } else {
+                        CameraSelector.DEFAULT_BACK_CAMERA
+                    }
+
+                    val preview = Preview.Builder().build().apply {
+                        surfaceProvider = previewView.surfaceProvider
+                    }
+
+                    val analyzer = ImageAnalysis.Builder()
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build()
+                        .apply {
+                            setAnalyzer(cameraExecutor) { imageProxy ->
+                                currentFrameCallback(imageProxy, currentFrontCamera)
+                            }
+                        }
+
+                    provider.bindToLifecycle(lifecycleOwner, selector, preview, analyzer)
+                } catch (_: Throwable) {
+                }
+            },
+            ContextCompat.getMainExecutor(context)
         )
     }
 
@@ -521,46 +636,96 @@ fun ZeroTraceVideoCallScreen(
             }
         } else {
             Box(modifier = Modifier.fillMaxSize()) {
-                // Remote Peer Video Stream Surface
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.radialGradient(
-                                listOf(Color(0xFF0E2920), Color(0xFF040608))
+                // Remote Peer Live Encrypted Video Surface
+                if (remoteVideoFrame != null && callState.isRemoteCameraEnabled) {
+                    Image(
+                        bitmap = remoteVideoFrame.asImageBitmap(),
+                        contentDescription = "Remote Encrypted Video Feed",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.radialGradient(
+                                    listOf(Color(0xFF0E2920), Color(0xFF040608))
+                                )
                             )
+                            .padding(20.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        ContactAvatar(
+                            alias = callState.peerAlias,
+                            onionAddress = callState.peerOnion,
+                            size = 96.dp
                         )
-                        .padding(20.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    ContactAvatar(
-                        alias = callState.peerAlias,
-                        onionAddress = callState.peerOnion,
-                        size = 96.dp
-                    )
-                    Spacer(modifier = Modifier.height(14.dp))
-                    Text(
-                        text = "${callState.peerAlias} • Encrypted Video over Tor TCP",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = Color.White
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "${formatCallDuration(callState.elapsedSeconds)} • Safety ${callState.peerSafetyDigits.take(14)}",
-                        style = MonospaceStyle.copy(fontSize = 13.sp),
-                        color = EmeraldPrimary
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Experimental Low-Bitrate VP8/AV1 AEAD Chunks over Tor TCP (RTT ~${callState.estimatedTorRttMs}ms)\nStandard WebRTC UDP/STUN is disabled to guarantee zero IP leakage.",
-                        style = MonospaceStyle.copy(fontSize = 10.sp),
-                        color = AmberWarning,
-                        textAlign = TextAlign.Center
-                    )
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(
+                            text = "${callState.peerAlias} • Encrypted Video over Tor TCP",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = Color.White
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = when (callState.protocolState) {
+                                CallProtocolState.RINGING_PEER -> "Ringing ${callState.peerAlias}…"
+                                CallProtocolState.ROUTING_TOR_CIRCUIT -> "Routing Tor/Onion Stream…"
+                                CallProtocolState.PERFORMING_PQXDH_CALL_AUTH -> "Deriving Ephemeral X25519 Key…"
+                                else -> if (!callState.isRemoteCameraEnabled) {
+                                    "Peer camera paused • ${formatCallDuration(callState.elapsedSeconds)}"
+                                } else {
+                                    "Waiting for remote video frames • ${formatCallDuration(callState.elapsedSeconds)}"
+                                }
+                            },
+                            style = MonospaceStyle.copy(fontSize = 13.sp),
+                            color = EmeraldPrimary
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Prioritized Audio+Video ChaCha20-Poly1305 over Onion TCP (Zero WebRTC UDP/STUN IP leaks)",
+                            style = MonospaceStyle.copy(fontSize = 10.sp),
+                            color = AmberWarning,
+                            textAlign = TextAlign.Center
+                        )
+                    }
                 }
 
-                // Floating Local Camera Self-Preview Window (Top End)
+                // Top-start security & live stream status pill
+                Surface(
+                    color = Color.Black.copy(alpha = 0.62f),
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.5f)),
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(top = 24.dp, start = 16.dp)
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Lock,
+                                contentDescription = null,
+                                tint = EmeraldPrimary,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = "${callState.peerAlias} • ${formatCallDuration(callState.elapsedSeconds)}",
+                                style = MonospaceStyle.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
+                                color = Color.White
+                            )
+                        }
+                        Text(
+                            text = "A:${callState.remoteAudioPacketsReceived} V:${callState.remoteVideoFramesReceived} • Safety ${callState.peerSafetyDigits.take(10)}",
+                            style = MonospaceStyle.copy(fontSize = 10.sp),
+                            color = CyanAccent
+                        )
+                    }
+                }
+
+                // Floating Local CameraX Self-Preview Window (Top End)
                 Surface(
                     color = Color(0xFF101920),
                     shape = RoundedCornerShape(16.dp),
@@ -570,31 +735,38 @@ fun ZeroTraceVideoCallScreen(
                         .padding(top = 24.dp, end = 16.dp)
                         .size(width = 118.dp, height = 164.dp)
                 ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(10.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Videocam,
-                            contentDescription = "Local Camera Preview",
-                            tint = if (callState.isCameraEnabled) EmeraldPrimary else CrimsonDanger
+                    if (isCameraActive) {
+                        AndroidView(
+                            factory = { previewView },
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(RoundedCornerShape(16.dp))
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = if (!callState.isCameraEnabled) {
-                                "Camera Off"
-                            } else if (callState.isFrontCamera) {
-                                "Front Cam\n${if (permissionsGranted) "Active" else "Preview"}"
-                            } else {
-                                "Rear Cam\n${if (permissionsGranted) "Active" else "Preview"}"
-                            },
-                            style = MonospaceStyle.copy(fontSize = 10.sp),
-                            color = Color.White,
-                            textAlign = TextAlign.Center
-                        )
+                    } else {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Videocam,
+                                contentDescription = "Local Camera Preview",
+                                tint = if (callState.isCameraEnabled) EmeraldPrimary else CrimsonDanger
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = if (!callState.isCameraEnabled) {
+                                    "Camera Off"
+                                } else {
+                                    "Camera Perm\nRequired"
+                                },
+                                style = MonospaceStyle.copy(fontSize = 10.sp),
+                                color = Color.White,
+                                textAlign = TextAlign.Center
+                            )
+                        }
                     }
                 }
 

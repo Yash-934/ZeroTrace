@@ -413,6 +413,106 @@ class ExampleUnitTest {
         TorOnionTransportManager.emergencyDisconnectAndWipe()
         assertEquals(ConnectivityState.OFFLINE, TorOnionTransportManager.connectivityState.value)
     }
+
+    @Test
+    fun testE2eeChatEnvelopeReplyReactionAndMediaRoundTrip() {
+        val textWire = com.zerotrace.bridge.E2eeChatEnvelope.encodeText(
+            msgId = "msg-42",
+            body = "Confirming tag reply sync!",
+            replyToId = "msg-10",
+            replyToPreview = "Original tagged message",
+            replyToSender = "Alice"
+        )
+        val decodedText = com.zerotrace.bridge.E2eeChatEnvelope.decode(textWire, "fallback")
+            as com.zerotrace.bridge.E2eeChatEnvelope.Decoded.Text
+        assertEquals("msg-42", decodedText.msgId)
+        assertEquals("Confirming tag reply sync!", decodedText.body)
+        assertEquals("msg-10", decodedText.replyToId)
+        assertEquals("Original tagged message", decodedText.replyToPreview)
+        assertEquals("Alice", decodedText.replyToSender)
+
+        val reactWire = com.zerotrace.bridge.E2eeChatEnvelope.encodeReaction("msg-42", "🔒")
+        val decodedReact = com.zerotrace.bridge.E2eeChatEnvelope.decode(reactWire, "fallback")
+            as com.zerotrace.bridge.E2eeChatEnvelope.Decoded.Reaction
+        assertEquals("msg-42", decodedReact.targetMsgId)
+        assertEquals("🔒", decodedReact.emoji)
+
+        val key32 = ByteArray(32) { (it + 3).toByte() }
+        val manifest = com.zerotrace.bridge.EncryptedFileManifest(
+            transferId = "tx-99",
+            sanitizedFileName = "voice_note_123.wav",
+            mimeType = "audio/wav",
+            totalSizeBytes = 6400,
+            totalChunks = 1,
+            sha256DigestHex = "ab".repeat(32)
+        )
+        val mediaWire = com.zerotrace.bridge.E2eeChatEnvelope.encodeMedia(
+            msgId = "msg-77",
+            payloadKind = com.zerotrace.bridge.MessagePayloadKind.VOICE_NOTE,
+            caption = "Voice Note (3s)",
+            voiceDurationSec = 3,
+            manifest = manifest,
+            fileSecretKey32 = key32,
+            replyToId = "msg-42",
+            replyToPreview = "Confirming tag reply sync!",
+            replyToSender = "You"
+        )
+        val decodedMedia = com.zerotrace.bridge.E2eeChatEnvelope.decode(mediaWire, "fallback")
+            as com.zerotrace.bridge.E2eeChatEnvelope.Decoded.Media
+        assertEquals("msg-77", decodedMedia.msgId)
+        assertEquals(com.zerotrace.bridge.MessagePayloadKind.VOICE_NOTE, decodedMedia.payloadKind)
+        assertEquals(3, decodedMedia.voiceDurationSec)
+        assertEquals("tx-99", decodedMedia.manifest.transferId)
+        assertEquals("You", decodedMedia.replyToSender)
+        assertArrayEquals(key32, decodedMedia.fileSecretKey32)
+    }
+
+    @Test
+    fun testEphemeralCallX25519KeyDerivationAndJpegExifStripping() {
+        val (callerPriv, callerPub) = com.zerotrace.media.EncryptedCallMediaEngine.generateEphemeralX25519KeyPair()
+        val (calleePriv, calleePub) = com.zerotrace.media.EncryptedCallMediaEngine.generateEphemeralX25519KeyPair()
+        val sessionId = "9f8e7d6c5b4a3210"
+        val callId = "call-uuid-1"
+
+        val callerKey = com.zerotrace.media.EncryptedCallMediaEngine.deriveCallMediaKey32(
+            localPriv32 = callerPriv,
+            remotePub32 = calleePub,
+            sessionIdHex = sessionId,
+            callId = callId
+        )
+        val calleeKey = com.zerotrace.media.EncryptedCallMediaEngine.deriveCallMediaKey32(
+            localPriv32 = calleePriv,
+            remotePub32 = callerPub,
+            sessionIdHex = sessionId,
+            callId = callId
+        )
+        assertEquals(32, callerKey.size)
+        assertArrayEquals(callerKey, calleeKey)
+
+        // Different callId must yield a different domain-separated call media key
+        val otherCallKey = com.zerotrace.media.EncryptedCallMediaEngine.deriveCallMediaKey32(
+            localPriv32 = callerPriv,
+            remotePub32 = calleePub,
+            sessionIdHex = sessionId,
+            callId = "call-uuid-2"
+        )
+        assertFalse(callerKey.contentEquals(otherCallKey))
+
+        // Synthetic JPEG: SOI (FF D8) + APP1 EXIF segment (FF E1, len 8, "Exif\u0000\u0000") + SOF0 (FF C0, len 4, 00 01) + EOI (FF D9)
+        val fakeJpegWithExif = byteArrayOf(
+            0xFF.toByte(), 0xD8.toByte(),
+            0xFF.toByte(), 0xE1.toByte(), 0x00, 0x08, 'E'.code.toByte(), 'x'.code.toByte(), 'i'.code.toByte(), 'f'.code.toByte(), 0x00, 0x00,
+            0xFF.toByte(), 0xC0.toByte(), 0x00, 0x04, 0x00, 0x01,
+            0xFF.toByte(), 0xD9.toByte()
+        )
+        val stripped = com.zerotrace.bridge.EncryptedFileTransferEngine.stripExifSegmentsInRam(fakeJpegWithExif)
+        assertTrue(stripped.size < fakeJpegWithExif.size)
+        val strippedStr = String(stripped, Charsets.ISO_8859_1)
+        assertFalse(strippedStr.contains("Exif"))
+        assertEquals(0xFF.toByte(), stripped[0])
+        assertEquals(0xD8.toByte(), stripped[1])
+    }
 }
+
 
 

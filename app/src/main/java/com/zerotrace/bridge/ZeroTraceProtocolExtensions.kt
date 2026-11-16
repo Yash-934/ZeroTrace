@@ -89,12 +89,192 @@ data class RichConversationMessage(
     val payloadKind: MessagePayloadKind = MessagePayloadKind.TEXT,
     val replyToMessageId: String? = null,
     val replyToPreview: String? = null,
+    val replyToSenderLabel: String? = null,
     val reactionEmoji: String? = null,
     val fileTransfer: EncryptedTransferProgress? = null,
     val voiceDurationSeconds: Int? = null
 ) {
     fun wipeFromRam() {
         fileTransfer?.wipeZeroize()
+    }
+}
+
+/**
+ * Structured, authenticated chat envelope serialized INSIDE the `ChaCha20-Poly1305` Double Ratchet
+ * plaintext so quoted replies, emoji reactions, and encrypted file keys never leak outside E2EE.
+ */
+object E2eeChatEnvelope {
+    private const val PREFIX = "ZT2ENV1|"
+    private val b64Enc = java.util.Base64.getUrlEncoder().withoutPadding()
+    private val b64Dec = java.util.Base64.getUrlDecoder()
+
+    sealed interface Decoded {
+        data class Text(
+            val msgId: String,
+            val body: String,
+            val replyToId: String?,
+            val replyToPreview: String?,
+            val replyToSender: String?
+        ) : Decoded
+
+        data class Media(
+            val msgId: String,
+            val payloadKind: MessagePayloadKind,
+            val caption: String,
+            val voiceDurationSec: Int?,
+            val manifest: EncryptedFileManifest,
+            val fileSecretKey32: ByteArray,
+            val replyToId: String?,
+            val replyToPreview: String?,
+            val replyToSender: String?
+        ) : Decoded
+
+        data class Reaction(
+            val targetMsgId: String,
+            val emoji: String
+        ) : Decoded
+    }
+
+    private fun encStr(s: String?): String {
+        if (s == null) return ""
+        return b64Enc.encodeToString(s.toByteArray(StandardCharsets.UTF_8))
+    }
+
+    private fun decStr(s: String): String {
+        if (s.isEmpty()) return ""
+        return String(b64Dec.decode(s), StandardCharsets.UTF_8)
+    }
+
+    fun encodeText(
+        msgId: String,
+        body: String,
+        replyToId: String? = null,
+        replyToPreview: String? = null,
+        replyToSender: String? = null
+    ): String {
+        return listOf(
+            "ZT2ENV1",
+            "MSG",
+            encStr(msgId),
+            encStr(body),
+            encStr(replyToId),
+            encStr(replyToPreview),
+            encStr(replyToSender)
+        ).joinToString("|")
+    }
+
+    fun encodeMedia(
+        msgId: String,
+        payloadKind: MessagePayloadKind,
+        caption: String,
+        voiceDurationSec: Int?,
+        manifest: EncryptedFileManifest,
+        fileSecretKey32: ByteArray,
+        replyToId: String? = null,
+        replyToPreview: String? = null,
+        replyToSender: String? = null
+    ): String {
+        return listOf(
+            "ZT2ENV1",
+            "MEDIA",
+            encStr(msgId),
+            payloadKind.name,
+            encStr(caption),
+            (voiceDurationSec ?: 0).toString(),
+            encStr(manifest.transferId),
+            encStr(manifest.sanitizedFileName),
+            encStr(manifest.mimeType),
+            manifest.totalSizeBytes.toString(),
+            manifest.totalChunks.toString(),
+            encStr(manifest.sha256DigestHex),
+            b64Enc.encodeToString(fileSecretKey32),
+            encStr(replyToId),
+            encStr(replyToPreview),
+            encStr(replyToSender)
+        ).joinToString("|")
+    }
+
+    fun encodeReaction(targetMsgId: String, emoji: String): String {
+        return listOf(
+            "ZT2ENV1",
+            "REACT",
+            encStr(targetMsgId),
+            encStr(emoji)
+        ).joinToString("|")
+    }
+
+    fun decode(rawPlaintext: String, fallbackMsgId: String): Decoded {
+        if (!rawPlaintext.startsWith(PREFIX)) {
+            return Decoded.Text(
+                msgId = fallbackMsgId,
+                body = rawPlaintext,
+                replyToId = null,
+                replyToPreview = null,
+                replyToSender = null
+            )
+        }
+        return try {
+            val parts = rawPlaintext.split("|")
+            when (parts.getOrNull(1)) {
+                "MSG" -> Decoded.Text(
+                    msgId = decStr(parts.getOrElse(2) { "" }).ifEmpty { fallbackMsgId },
+                    body = decStr(parts.getOrElse(3) { "" }),
+                    replyToId = decStr(parts.getOrElse(4) { "" }).ifEmpty { null },
+                    replyToPreview = decStr(parts.getOrElse(5) { "" }).ifEmpty { null },
+                    replyToSender = decStr(parts.getOrElse(6) { "" }).ifEmpty { null }
+                )
+
+                "MEDIA" -> {
+                    val kind = try {
+                        MessagePayloadKind.valueOf(parts.getOrElse(3) { "DOCUMENT" })
+                    } catch (_: Exception) {
+                        MessagePayloadKind.DOCUMENT
+                    }
+                    val dur = parts.getOrElse(5) { "0" }.toIntOrNull()?.takeIf { it > 0 }
+                    val manifest = EncryptedFileManifest(
+                        transferId = decStr(parts.getOrElse(6) { "" }),
+                        sanitizedFileName = decStr(parts.getOrElse(7) { "" }),
+                        mimeType = decStr(parts.getOrElse(8) { "" }),
+                        totalSizeBytes = parts.getOrElse(9) { "0" }.toIntOrNull() ?: 0,
+                        totalChunks = parts.getOrElse(10) { "0" }.toIntOrNull() ?: 0,
+                        sha256DigestHex = decStr(parts.getOrElse(11) { "" })
+                    )
+                    val keyBytes = b64Dec.decode(parts.getOrElse(12) { "" })
+                    Decoded.Media(
+                        msgId = decStr(parts.getOrElse(2) { "" }).ifEmpty { fallbackMsgId },
+                        payloadKind = kind,
+                        caption = decStr(parts.getOrElse(4) { "" }),
+                        voiceDurationSec = dur,
+                        manifest = manifest,
+                        fileSecretKey32 = keyBytes,
+                        replyToId = decStr(parts.getOrElse(13) { "" }).ifEmpty { null },
+                        replyToPreview = decStr(parts.getOrElse(14) { "" }).ifEmpty { null },
+                        replyToSender = decStr(parts.getOrElse(15) { "" }).ifEmpty { null }
+                    )
+                }
+
+                "REACT" -> Decoded.Reaction(
+                    targetMsgId = decStr(parts.getOrElse(2) { "" }),
+                    emoji = decStr(parts.getOrElse(3) { "" })
+                )
+
+                else -> Decoded.Text(
+                    msgId = fallbackMsgId,
+                    body = rawPlaintext,
+                    replyToId = null,
+                    replyToPreview = null,
+                    replyToSender = null
+                )
+            }
+        } catch (_: Exception) {
+            Decoded.Text(
+                msgId = fallbackMsgId,
+                body = rawPlaintext,
+                replyToId = null,
+                replyToPreview = null,
+                replyToSender = null
+            )
+        }
     }
 }
 
@@ -157,7 +337,7 @@ object EncryptedFileTransferEngine {
         val safeName = sanitizeFileName(rawFileName)
         val safeMime = validateMimeTypeOrThrow(mimeType)
 
-        // Strip EXIF marker headers in RAM if requested for JPEG/PNG payloads
+        // Strip EXIF/XMP/IPTC marker segments in RAM if requested for JPEG/image payloads
         val cleanPayload = if (stripImageMetadata && safeMime.startsWith("image/")) {
             stripExifSegmentsInRam(payloadBytes)
         } else {
@@ -248,8 +428,59 @@ object EncryptedFileTransferEngine {
         return reassembled
     }
 
-    private fun stripExifSegmentsInRam(input: ByteArray): ByteArray {
-        return input.copyOf()
+    /**
+     * Strips JPEG APP1..APP15 (`0xFFE1..0xFFEF`, which hold EXIF, GPS, XMP, and camera metadata)
+     * strictly in RAM while leaving SOS scan image data untouched.
+     */
+    fun stripExifSegmentsInRam(input: ByteArray): ByteArray {
+        if (input.size < 4 || input[0] != 0xFF.toByte() || input[1] != 0xD8.toByte()) {
+            return input.copyOf()
+        }
+        return try {
+            val out = java.io.ByteArrayOutputStream(input.size)
+            out.write(0xFF)
+            out.write(0xD8)
+            var idx = 2
+            while (idx + 1 < input.size) {
+                if (input[idx] != 0xFF.toByte()) {
+                    out.write(input, idx, input.size - idx)
+                    break
+                }
+                while (idx < input.size && input[idx] == 0xFF.toByte()) idx++
+                if (idx >= input.size) break
+                val marker = input[idx].toInt() and 0xFF
+                idx++
+                if (marker == 0xDA || marker == 0xD9) {
+                    out.write(0xFF)
+                    out.write(marker)
+                    if (idx < input.size) out.write(input, idx, input.size - idx)
+                    break
+                }
+                if (marker == 0x00 || marker in 0xD0..0xD7) {
+                    out.write(0xFF)
+                    out.write(marker)
+                    continue
+                }
+                if (idx + 1 >= input.size) break
+                val segLen = ((input[idx].toInt() and 0xFF) shl 8) or (input[idx + 1].toInt() and 0xFF)
+                if (segLen < 2 || idx + segLen > input.size) {
+                    out.write(0xFF)
+                    out.write(marker)
+                    out.write(input, idx, input.size - idx)
+                    break
+                }
+                // Strip APP1..APP15 (EXIF / XMP / ICC / GPS) and COM comments
+                if (marker !in 0xE1..0xEF && marker != 0xFE) {
+                    out.write(0xFF)
+                    out.write(marker)
+                    out.write(input, idx, segLen)
+                }
+                idx += segLen
+            }
+            out.toByteArray()
+        } catch (_: Exception) {
+            input.copyOf()
+        }
     }
 
     private fun deriveChunkNonce(baseNonce12: ByteArray, chunkIndex: Int): ByteArray {
@@ -344,7 +575,12 @@ data class ActiveCallUiState(
     val isSpeakerOn: Boolean = false,
     val isCameraEnabled: Boolean = false,
     val isFrontCamera: Boolean = true,
-    val estimatedTorRttMs: Int = 460
+    val estimatedTorRttMs: Int = 180,
+    val remoteAudioPacketsReceived: Long = 0L,
+    val remoteVideoFramesReceived: Long = 0L,
+    val isRemoteMuted: Boolean = false,
+    val isRemoteCameraEnabled: Boolean = true,
+    val callTransportNote: String = "Tor/Onion TCP AEAD Media Stream"
 )
 
 data class VolatileCallHistoryEntry(

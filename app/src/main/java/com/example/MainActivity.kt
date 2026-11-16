@@ -104,6 +104,10 @@ fun ZeroTraceRootApp(
     val localListenerPort by viewModel.localListenerPort.collectAsStateWithLifecycle()
     val transportError by viewModel.transportError.collectAsStateWithLifecycle()
     val connectedPeerOnions by viewModel.connectedPeerOnions.collectAsStateWithLifecycle()
+    val voiceRecordingSeconds by viewModel.voiceRecordingSeconds.collectAsStateWithLifecycle()
+    val voiceRecordingAmplitude by viewModel.voiceRecordingAmplitude.collectAsStateWithLifecycle()
+    val playingVoiceMessageId by viewModel.playingVoiceMessageId.collectAsStateWithLifecycle()
+    val remoteCallVideoFrame by viewModel.remoteCallVideoFrame.collectAsStateWithLifecycle()
 
     val effectiveErrorBanner = uiState.errorBannerMessage ?: transportError
     val isHindi = uiState.language == AppLanguage.HINDI
@@ -349,6 +353,9 @@ fun ZeroTraceRootApp(
                 inspectedMessageInfo = uiState.inspectedMessageInfo,
                 showAttachmentSheet = uiState.showAttachmentSheet,
                 isRecordingVoiceNote = uiState.isRecordingVoiceNote,
+                voiceRecordingSeconds = voiceRecordingSeconds,
+                voiceRecordingAmplitude = voiceRecordingAmplitude,
+                playingVoiceMessageId = playingVoiceMessageId,
                 inChatSearchQuery = uiState.inChatSearchQuery,
                 wallpaperStyle = uiState.wallpaperStyle,
                 statusBanner = uiState.statusBannerMessage,
@@ -362,6 +369,10 @@ fun ZeroTraceRootApp(
                 onOpenMediaPreview = viewModel::openMediaPreview,
                 onShowAttachmentSheet = viewModel::setShowAttachmentSheet,
                 onToggleVoiceRecording = viewModel::toggleVoiceNoteRecording,
+                onCancelVoiceRecording = viewModel::cancelVoiceNoteRecording,
+                onToggleVoicePlay = viewModel::toggleVoiceNotePlayback,
+                onPickMediaUri = viewModel::sendMediaFromUri,
+                onCapturedCameraBitmap = viewModel::sendCapturedCameraBitmap,
                 onSendEncryptedAttachment = { kind, name, mime, bytes, caption ->
                     viewModel.sendEncryptedAttachmentPayload(kind, name, mime, bytes, caption)
                 },
@@ -437,6 +448,8 @@ fun ZeroTraceRootApp(
         ZeroTraceScreen.VIDEO_CALL -> {
             ZeroTraceVideoCallScreen(
                 callState = uiState.activeCallState,
+                remoteVideoFrame = remoteCallVideoFrame,
+                onLocalCameraFrame = viewModel::submitLocalCallVideoFrame,
                 onToggleMute = viewModel::toggleCallMute,
                 onToggleCamera = viewModel::toggleCallCamera,
                 onFlipCamera = viewModel::flipCallCamera,

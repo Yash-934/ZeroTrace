@@ -1,12 +1,16 @@
 package com.zerotrace.ui
 
 import android.app.Application
+import android.graphics.Bitmap
+import android.net.Uri
+import androidx.camera.core.ImageProxy
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.zerotrace.bridge.ActiveCallUiState
 import com.zerotrace.bridge.CallDirectionFilter
 import com.zerotrace.bridge.CallMediaKind
 import com.zerotrace.bridge.CallProtocolState
+import com.zerotrace.bridge.E2eeChatEnvelope
 import com.zerotrace.bridge.EncryptedFileTransferEngine
 import com.zerotrace.bridge.EncryptedTransferProgress
 import com.zerotrace.bridge.EphemeralStatusItem
@@ -24,6 +28,10 @@ import com.zerotrace.bridge.TransferLifecycleState
 import com.zerotrace.bridge.VerifiedContactRecord
 import com.zerotrace.bridge.VolatileCallHistoryEntry
 import com.zerotrace.bridge.VolatileChatMessage
+import com.zerotrace.media.EncryptedCallMediaEngine
+import com.zerotrace.media.MediaRamLoader
+import com.zerotrace.media.VoiceNotePlayer
+import com.zerotrace.media.VoiceNoteRecorder
 import com.zerotrace.network.ConnectivityState
 import com.zerotrace.network.PeerHelloWire
 import com.zerotrace.network.PeerTransportEvent
@@ -46,6 +54,7 @@ import java.io.DataOutputStream
 import java.nio.charset.StandardCharsets
 import java.util.Arrays
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -172,9 +181,20 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
     val localListenerPort: StateFlow<Int?> = TorOnionTransportManager.localListenerPort
     val transportError: StateFlow<String?> = TorOnionTransportManager.lastErrorDetail
     val connectedPeerOnions: StateFlow<Set<String>> = TorOnionTransportManager.connectedPeerOnions
+    val voiceRecordingSeconds: StateFlow<Int> = VoiceNoteRecorder.recordingSeconds
+    val voiceRecordingAmplitude: StateFlow<Float> = VoiceNoteRecorder.amplitudeLevel
+    val playingVoiceMessageId: StateFlow<String?> = VoiceNotePlayer.playingMessageId
+    val remoteCallVideoFrame: StateFlow<Bitmap?> = EncryptedCallMediaEngine.remoteVideoFrame
 
     private var inactivityWatchdogJob: Job? = null
     private var callTimerJob: Job? = null
+    private val processedVolatileMsgKeys = ConcurrentHashMap.newKeySet<String>()
+
+    // Active / pending E2EE call key & signaling state (RAM only)
+    private var pendingCallPrivKey32: ByteArray? = null
+    private var pendingIncomingRemoteHost: String? = null
+    private var pendingIncomingMediaPort: Int? = null
+    private var pendingIncomingRemoteEphemPub: ByteArray? = null
 
     init {
         TorOnionTransportManager.initializePlatform(appContext)
@@ -189,6 +209,16 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 when (event) {
                     is PeerTransportEvent.PeerConnected -> {
                         ensurePeerContactFromHello(event.peerHello)
+                        val currentPeer = _uiState.value.activePeerContact?.onionAddress
+                        if (currentPeer != null && currentPeer.equals(event.peerOnion, ignoreCase = true)) {
+                            _uiState.update { state ->
+                                if (state.statusBannerMessage?.contains("disconnected", ignoreCase = true) == true ||
+                                    state.statusBannerMessage?.contains("कट गया") == true
+                                ) {
+                                    state.copy(statusBannerMessage = null)
+                                } else state
+                            }
+                        }
                     }
                     is PeerTransportEvent.PeerDisconnected -> {
                         val currentPeerOnion = _uiState.value.activePeerContact?.onionAddress
@@ -249,6 +279,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                                 activeChatMessages = if (isViewingThisPeer) volatileMsgs else state.activeChatMessages,
                                 activeRatchetMetrics = if (isViewingThisPeer) metrics else state.activeRatchetMetrics,
                                 unreadCountByOnion = updatedUnread,
+                                statusBannerMessage = null,
                                 errorBannerMessage = null
                             )
                         }
@@ -263,6 +294,25 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                             }
                         }
                     }
+                    is PeerTransportEvent.IncomingCallInvite -> {
+                        handleIncomingCallInviteEvent(event)
+                    }
+                    is PeerTransportEvent.CallAccepted -> {
+                        handleCallAcceptedEvent(event)
+                    }
+                    is PeerTransportEvent.CallRejected -> {
+                        val active = _uiState.value.activeCallState
+                        if (active != null && active.callId == event.callId) {
+                            cleanupCallResourcesAndReturn("Call declined by peer: ${event.reason}")
+                        }
+                    }
+                    is PeerTransportEvent.CallEnded -> {
+                        val active = _uiState.value.activeCallState
+                        if (active != null && active.callId == event.callId) {
+                            cleanupCallResourcesAndReturn("Encrypted call ended by ${active.peerAlias}. Media key zeroized.")
+                        }
+                    }
+                    is PeerTransportEvent.IncomingCallMediaFrame -> Unit
                 }
             }
         }
@@ -840,7 +890,9 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             val volatileMsgs = RustCoreBridge.getVolatileMessages(existingHandle)
             val metrics = RustCoreBridge.getSessionMetrics(existingHandle)
             if (metrics != null) {
-                syncVolatileMessagesToRichConversation(normalizedContact.onionAddress, volatileMsgs)
+                viewModelScope.launch {
+                    syncVolatileMessagesToRichConversation(normalizedContact.onionAddress, volatileMsgs)
+                }
                 _uiState.update { state ->
                     val clearedUnread = state.unreadCountByOnion.toMutableMap().apply {
                         put(normalizedContact.onionAddress, 0)
@@ -938,6 +990,18 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         if (trimmed.isEmpty()) return
 
         val replyTarget = _uiState.value.replyingToMessage
+        val msgId = UUID.randomUUID().toString()
+        val wirePlaintext = if (replyTarget != null) {
+            E2eeChatEnvelope.encodeText(
+                msgId = msgId,
+                body = trimmed,
+                replyToId = replyTarget.id,
+                replyToPreview = replyTarget.bodyText.take(80),
+                replyToSender = replyTarget.senderLabel
+            )
+        } else {
+            E2eeChatEnvelope.encodeText(msgId = msgId, body = trimmed)
+        }
 
         viewModelScope.launch {
             var handle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress)
@@ -960,7 +1024,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
 
             val result = TorOnionTransportManager.sendEncryptedMessageOverCircuit(
                 sessionHandle = handle,
-                plaintext = trimmed,
+                plaintext = wirePlaintext,
                 forcePqBraidStep = forcePqBraidStep,
                 contact = contact
             )
@@ -969,8 +1033,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     val effectiveHandle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress) ?: handle
                     syncVolatileMessagesToRichConversation(
                         onionAddress = contact.onionAddress,
-                        volatileMessages = updatedMessages,
-                        attachReplyTargetToLatestOutgoing = replyTarget
+                        volatileMessages = updatedMessages
                     )
                     _uiState.update {
                         it.copy(
@@ -1024,6 +1087,18 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             map[contact.onionAddress] = updatedList
             state.copy(richMessagesByOnion = map)
         }
+        val handle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress)
+            ?: _uiState.value.activeSessionHandle ?: return
+        if (!TorOnionTransportManager.isLoopbackVerificationContact(contact)) {
+            viewModelScope.launch {
+                val reactPayload = E2eeChatEnvelope.encodeReaction(message.id, emoji)
+                TorOnionTransportManager.sendEncryptedMessageOverCircuit(
+                    sessionHandle = handle,
+                    plaintext = reactPayload,
+                    contact = contact
+                )
+            }
+        }
     }
 
     fun deleteSingleMessageFromRam(message: RichConversationMessage) {
@@ -1045,25 +1120,100 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         _uiState.update { it.copy(showAttachmentSheet = show) }
     }
 
-    fun toggleVoiceNoteRecording() {
-        val currentlyRecording = _uiState.value.isRecordingVoiceNote
-        if (!currentlyRecording) {
+    fun startRealVoiceRecording() {
+        if (_uiState.value.isRecordingVoiceNote) return
+        val started = VoiceNoteRecorder.startRecording()
+        if (started) {
             _uiState.update {
                 it.copy(
                     isRecordingVoiceNote = true,
-                    statusBannerMessage = "Recording volatile Opus/PCM voice note in RAM (no disk temp file)…"
+                    errorBannerMessage = null
                 )
             }
         } else {
+            _uiState.update {
+                it.copy(
+                    isRecordingVoiceNote = false,
+                    errorBannerMessage = "Microphone unavailable or permission denied for voice recording."
+                )
+            }
+        }
+    }
+
+    fun cancelVoiceNoteRecording() {
+        VoiceNoteRecorder.cancelAndWipe()
+        _uiState.update { it.copy(isRecordingVoiceNote = false, statusBannerMessage = null) }
+    }
+
+    fun toggleVoiceNoteRecording() {
+        val currentlyRecording = _uiState.value.isRecordingVoiceNote
+        if (!currentlyRecording) {
+            startRealVoiceRecording()
+        } else {
             _uiState.update { it.copy(isRecordingVoiceNote = false, statusBannerMessage = null) }
-            sendEncryptedAttachmentPayload(
-                kind = MessagePayloadKind.VOICE_NOTE,
-                fileName = "voice_note_${System.currentTimeMillis() % 10000}.ogg",
-                mimeType = "audio/ogg",
-                samplePayloadBytes = "ZT2-ENCRYPTED-OPUS-VOICE-FRAME-${System.nanoTime()}".toByteArray(StandardCharsets.UTF_8),
-                caption = "Encrypted Voice Note (RAM-only stream)",
-                voiceDurationSec = 4
-            )
+            viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                val finalized = VoiceNoteRecorder.stopAndFinalizeWav()
+                if (finalized == null) {
+                    _uiState.update {
+                        it.copy(statusBannerMessage = "Voice note too short — recording discarded from RAM.")
+                    }
+                    return@launch
+                }
+                val (wavBytes, durationSec) = finalized
+                sendEncryptedAttachmentPayload(
+                    kind = MessagePayloadKind.VOICE_NOTE,
+                    fileName = "voice_note_${System.currentTimeMillis() % 10000}.wav",
+                    mimeType = "audio/wav",
+                    samplePayloadBytes = wavBytes,
+                    caption = "Voice Note (${durationSec}s)",
+                    voiceDurationSec = durationSec
+                )
+            }
+        }
+    }
+
+    fun toggleVoiceNotePlayback(message: RichConversationMessage) {
+        val bytes = message.fileTransfer?.decryptedInMemoryBytes ?: return
+        VoiceNotePlayer.togglePlay(message.id, bytes)
+    }
+
+    fun sendMediaFromUri(uri: Uri, kind: MessagePayloadKind) {
+        _uiState.update { it.copy(showAttachmentSheet = false) }
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val loaded = MediaRamLoader.loadUriToRam(appContext, uri, kind)
+                sendEncryptedAttachmentPayload(
+                    kind = kind,
+                    fileName = loaded.fileName,
+                    mimeType = loaded.mimeType,
+                    samplePayloadBytes = loaded.payloadBytes,
+                    caption = loaded.caption
+                )
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(errorBannerMessage = "Media load rejected: ${e.message}")
+                }
+            }
+        }
+    }
+
+    fun sendCapturedCameraBitmap(bitmap: Bitmap) {
+        _uiState.update { it.copy(showAttachmentSheet = false) }
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val loaded = MediaRamLoader.encodeCameraBitmapToCleanJpeg(bitmap)
+                sendEncryptedAttachmentPayload(
+                    kind = MessagePayloadKind.IMAGE,
+                    fileName = loaded.fileName,
+                    mimeType = loaded.mimeType,
+                    samplePayloadBytes = loaded.payloadBytes,
+                    caption = loaded.caption
+                )
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(errorBannerMessage = "Camera capture rejected: ${e.message}")
+                }
+            }
         }
     }
 
@@ -1075,10 +1225,12 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         caption: String,
         voiceDurationSec: Int? = null
     ) {
-        val handle = _uiState.value.activeSessionHandle ?: return
         val contact = _uiState.value.activePeerContact ?: return
+        val handle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress)
+            ?: _uiState.value.activeSessionHandle ?: return
+        val replyTarget = _uiState.value.replyingToMessage
 
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             try {
                 // 1. Encrypt & chunk payload with a dedicated 256-bit ChaCha20-Poly1305 file key
                 val bundle = EncryptedFileTransferEngine.encryptAndChunkPayload(
@@ -1088,12 +1240,33 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     stripImageMetadata = (kind == MessagePayloadKind.IMAGE)
                 )
 
-                // 2. Verify round-trip chunk reassembly + SHA-256 integrity
+                // 2. Verify round-trip chunk reassembly + SHA-256 integrity for local sender preview in RAM
                 val reassembled = EncryptedFileTransferEngine.decryptAndVerifyChunks(
                     manifest = bundle.manifest,
                     fileSecretKey32 = bundle.fileSecretKey32,
                     chunks = bundle.chunks
                 )
+
+                // 3. Transmit actual ChaCha20-Poly1305 encrypted chunks to peer device (if real peer)
+                val isRealPeer = !TorOnionTransportManager.isLoopbackVerificationContact(contact)
+                if (isRealPeer) {
+                    val chunksSent = TorOnionTransportManager.sendEncryptedMediaChunks(
+                        peerOnion = contact.onionAddress,
+                        transferId = bundle.manifest.transferId,
+                        chunks = bundle.chunks
+                    )
+                    if (!chunksSent) {
+                        bundle.wipeZeroize()
+                        Arrays.fill(reassembled, 0.toByte())
+                        _uiState.update {
+                            it.copy(
+                                showAttachmentSheet = false,
+                                errorBannerMessage = "Media transfer failed: Peer P2P circuit not connected."
+                            )
+                        }
+                        return@launch
+                    }
+                }
 
                 val transferProgress = EncryptedTransferProgress(
                     manifest = bundle.manifest,
@@ -1104,21 +1277,37 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     decryptedInMemoryBytes = reassembled
                 )
 
-                // 3. Send the encrypted manifest summary over the Hybrid Double Ratchet circuit
-                val wireNotice = "[E2EE-${kind.name}] ${bundle.manifest.sanitizedFileName} (${bundle.manifest.totalSizeBytes}B, ${bundle.manifest.totalChunks} chunk(s), SHA256=${bundle.manifest.sha256DigestHex.take(12)}) — $caption"
+                val msgId = UUID.randomUUID().toString()
+                val wireEnvelope = E2eeChatEnvelope.encodeMedia(
+                    msgId = msgId,
+                    payloadKind = kind,
+                    caption = caption,
+                    voiceDurationSec = voiceDurationSec,
+                    manifest = bundle.manifest,
+                    fileSecretKey32 = bundle.fileSecretKey32,
+                    replyToId = replyTarget?.id,
+                    replyToPreview = replyTarget?.bodyText?.take(80),
+                    replyToSender = replyTarget?.senderLabel
+                )
+
                 val sendRes = TorOnionTransportManager.sendEncryptedMessageOverCircuit(
                     sessionHandle = handle,
-                    plaintext = wireNotice,
+                    plaintext = wireEnvelope,
                     forcePqBraidStep = false,
                     contact = contact
                 )
 
                 sendRes.fold(
                     onSuccess = { updatedVolatile ->
-                        val metrics = RustCoreBridge.getSessionMetrics(handle)
+                        // Mark outgoing volatile message ID so sync does not duplicate it
+                        updatedVolatile.lastOrNull { it.isOutgoing }?.let { vm ->
+                            processedVolatileMsgKeys.add("${contact.onionAddress}:${vm.messageId}")
+                        }
+                        val effectiveHandle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress) ?: handle
+                        val metrics = RustCoreBridge.getSessionMetrics(effectiveHandle)
                         val richMsg = RichConversationMessage(
-                            id = UUID.randomUUID().toString(),
-                            senderLabel = "You (Local Identity)",
+                            id = msgId,
+                            senderLabel = "You",
                             bodyText = caption,
                             timestampEpochMillis = System.currentTimeMillis(),
                             isOutgoing = true,
@@ -1126,33 +1315,42 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                             pqEpoch = metrics?.ratchetEpoch ?: 1,
                             pqBraidAdvanced = false,
                             payloadKind = kind,
+                            replyToMessageId = replyTarget?.id,
+                            replyToPreview = replyTarget?.bodyText?.take(80),
+                            replyToSenderLabel = replyTarget?.senderLabel,
                             fileTransfer = transferProgress,
                             voiceDurationSeconds = voiceDurationSec
                         )
+                        bundle.wipeZeroize()
 
                         _uiState.update { state ->
                             val currentRich = state.richMessagesByOnion[contact.onionAddress].orEmpty()
                             val updatedMap = state.richMessagesByOnion.toMutableMap()
                             updatedMap[contact.onionAddress] = currentRich + richMsg
                             val previews = state.lastMessagePreviewByOnion.toMutableMap().apply {
-                                put(contact.onionAddress, "📎 ${bundle.manifest.sanitizedFileName}")
+                                val icon = if (kind == MessagePayloadKind.VOICE_NOTE) "🎤" else "📎"
+                                put(contact.onionAddress, "$icon ${bundle.manifest.sanitizedFileName}")
                             }
                             val times = state.lastMessageTimeByOnion.toMutableMap().apply {
                                 put(contact.onionAddress, richMsg.timestampEpochMillis)
                             }
                             state.copy(
                                 showAttachmentSheet = false,
+                                replyingToMessage = null,
+                                activeSessionHandle = effectiveHandle,
                                 activeChatMessages = updatedVolatile,
                                 activeRatchetMetrics = metrics,
                                 richMessagesByOnion = updatedMap,
                                 lastMessagePreviewByOnion = previews,
                                 lastMessageTimeByOnion = times,
-                                statusBannerMessage = "Encrypted ${bundle.manifest.sanitizedFileName} with 256-bit ChaCha20-Poly1305 file key & SHA-256 verified."
+                                statusBannerMessage = null,
+                                errorBannerMessage = null
                             )
                         }
                     },
                     onFailure = { err ->
                         bundle.wipeZeroize()
+                        Arrays.fill(reassembled, 0.toByte())
                         _uiState.update {
                             it.copy(
                                 showAttachmentSheet = false,
@@ -1172,41 +1370,134 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private fun syncVolatileMessagesToRichConversation(
+    private suspend fun syncVolatileMessagesToRichConversation(
         onionAddress: String,
-        volatileMessages: List<VolatileChatMessage>,
-        attachReplyTargetToLatestOutgoing: RichConversationMessage? = null
+        volatileMessages: List<VolatileChatMessage>
     ) {
-        val currentRich = _uiState.value.richMessagesByOnion[onionAddress].orEmpty()
-        val existingIds = currentRich.map { it.id }.toSet()
+        val currentRich = _uiState.value.richMessagesByOnion[onionAddress].orEmpty().toMutableList()
+        val peerAlias = _uiState.value.verifiedContacts.firstOrNull {
+            it.onionAddress.equals(onionAddress, ignoreCase = true)
+        }?.alias ?: onionAddress.take(10)
 
-        val newlyConverted = volatileMessages.filter { it.messageId.toString() !in existingIds }.map { vm ->
-            val isLatestOutgoing = vm.isOutgoing && vm.messageId == volatileMessages.lastOrNull { m -> m.isOutgoing }?.messageId
-            val replyRef = if (isLatestOutgoing) attachReplyTargetToLatestOutgoing else null
-            RichConversationMessage(
-                id = vm.messageId.toString(),
-                senderLabel = if (vm.isOutgoing) "You" else onionAddress.take(10),
-                bodyText = vm.readPlaintext(),
-                timestampEpochMillis = vm.timestampEpochSec * 1000L,
-                isOutgoing = vm.isOutgoing,
-                ratchetStepIndex = vm.msgCounter.toInt(),
-                pqEpoch = vm.ratchetEpoch,
-                pqBraidAdvanced = vm.pqBraidStepTriggered,
-                payloadKind = MessagePayloadKind.TEXT,
-                replyToMessageId = replyRef?.id,
-                replyToPreview = replyRef?.bodyText?.take(80)
-            )
+        var changed = false
+        for (vm in volatileMessages) {
+            val volKey = "$onionAddress:${vm.messageId}"
+            if (!processedVolatileMsgKeys.add(volKey)) continue
+
+            val rawText = vm.readPlaintext()
+            val decoded = E2eeChatEnvelope.decode(rawText, vm.messageId.toString())
+            when (decoded) {
+                is E2eeChatEnvelope.Decoded.Reaction -> {
+                    val idx = currentRich.indexOfFirst { it.id == decoded.targetMsgId }
+                    if (idx >= 0) {
+                        currentRich[idx] = currentRich[idx].copy(reactionEmoji = decoded.emoji.ifBlank { null })
+                        changed = true
+                    }
+                }
+
+                is E2eeChatEnvelope.Decoded.Text -> {
+                    if (currentRich.any { it.id == decoded.msgId }) continue
+                    currentRich.add(
+                        RichConversationMessage(
+                            id = decoded.msgId,
+                            senderLabel = if (vm.isOutgoing) "You" else peerAlias,
+                            bodyText = decoded.body,
+                            timestampEpochMillis = vm.timestampEpochSec * 1000L,
+                            isOutgoing = vm.isOutgoing,
+                            ratchetStepIndex = vm.msgCounter.toInt(),
+                            pqEpoch = vm.ratchetEpoch,
+                            pqBraidAdvanced = vm.pqBraidStepTriggered,
+                            payloadKind = MessagePayloadKind.TEXT,
+                            replyToMessageId = decoded.replyToId,
+                            replyToPreview = decoded.replyToPreview,
+                            replyToSenderLabel = decoded.replyToSender
+                        )
+                    )
+                    changed = true
+                }
+
+                is E2eeChatEnvelope.Decoded.Media -> {
+                    if (currentRich.any { it.id == decoded.msgId }) continue
+                    val chunks = TorOnionTransportManager.awaitAndTakeMediaChunks(
+                        transferId = decoded.manifest.transferId,
+                        expectedChunks = decoded.manifest.totalChunks
+                    )
+                    val progress = if (chunks != null) {
+                        try {
+                            val decryptedBytes = EncryptedFileTransferEngine.decryptAndVerifyChunks(
+                                manifest = decoded.manifest,
+                                fileSecretKey32 = decoded.fileSecretKey32,
+                                chunks = chunks
+                            )
+                            chunks.forEach { it.wipeZeroize() }
+                            EncryptedTransferProgress(
+                                manifest = decoded.manifest,
+                                direction = TransferDirection.INCOMING,
+                                state = TransferLifecycleState.VERIFIED_READY_IN_RAM,
+                                chunksProcessed = decoded.manifest.totalChunks,
+                                bytesTransferred = decoded.manifest.totalSizeBytes.toLong(),
+                                decryptedInMemoryBytes = decryptedBytes
+                            )
+                        } catch (e: Exception) {
+                            EncryptedTransferProgress(
+                                manifest = decoded.manifest,
+                                direction = TransferDirection.INCOMING,
+                                state = TransferLifecycleState.INTEGRITY_FAILED,
+                                chunksProcessed = chunks.size,
+                                bytesTransferred = 0L,
+                                failureReason = e.message
+                            )
+                        }
+                    } else {
+                        EncryptedTransferProgress(
+                            manifest = decoded.manifest,
+                            direction = TransferDirection.INCOMING,
+                            state = TransferLifecycleState.INTEGRITY_FAILED,
+                            chunksProcessed = 0,
+                            bytesTransferred = 0L,
+                            failureReason = "Encrypted media chunks missing or interrupted"
+                        )
+                    }
+                    Arrays.fill(decoded.fileSecretKey32, 0.toByte())
+
+                    currentRich.add(
+                        RichConversationMessage(
+                            id = decoded.msgId,
+                            senderLabel = if (vm.isOutgoing) "You" else peerAlias,
+                            bodyText = decoded.caption,
+                            timestampEpochMillis = vm.timestampEpochSec * 1000L,
+                            isOutgoing = vm.isOutgoing,
+                            ratchetStepIndex = vm.msgCounter.toInt(),
+                            pqEpoch = vm.ratchetEpoch,
+                            pqBraidAdvanced = vm.pqBraidStepTriggered,
+                            payloadKind = decoded.payloadKind,
+                            replyToMessageId = decoded.replyToId,
+                            replyToPreview = decoded.replyToPreview,
+                            replyToSenderLabel = decoded.replyToSender,
+                            fileTransfer = progress,
+                            voiceDurationSeconds = decoded.voiceDurationSec
+                        )
+                    )
+                    changed = true
+                }
+            }
         }
 
-        val combined = currentRich + newlyConverted
-        val lastMsg = combined.lastOrNull()
+        if (!changed) return
+        val lastMsg = currentRich.lastOrNull()
         _uiState.update { state ->
             val map = state.richMessagesByOnion.toMutableMap()
-            map[onionAddress] = combined
+            map[onionAddress] = currentRich
             val previews = state.lastMessagePreviewByOnion.toMutableMap()
             val times = state.lastMessageTimeByOnion.toMutableMap()
             if (lastMsg != null) {
-                previews[onionAddress] = lastMsg.bodyText
+                val previewStr = when (lastMsg.payloadKind) {
+                    MessagePayloadKind.VOICE_NOTE -> "🎤 Voice Note (${lastMsg.voiceDurationSeconds ?: 1}s)"
+                    MessagePayloadKind.IMAGE, MessagePayloadKind.VIDEO, MessagePayloadKind.DOCUMENT, MessagePayloadKind.AUDIO_FILE ->
+                        "📎 ${lastMsg.fileTransfer?.manifest?.sanitizedFileName ?: lastMsg.bodyText}"
+                    else -> lastMsg.bodyText
+                }
+                previews[onionAddress] = previewStr
                 times[onionAddress] = lastMsg.timestampEpochMillis
             }
             state.copy(
@@ -1246,11 +1537,15 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
     fun terminateActiveChatSession() {
         val handle = _uiState.value.activeSessionHandle
         val peerOnion = _uiState.value.activePeerContact?.onionAddress
+        VoiceNoteRecorder.cancelAndWipe()
+        VoiceNotePlayer.stop()
+        EncryptedCallMediaEngine.stopAndWipe()
         if (handle != null) {
             TorOnionTransportManager.disconnectPeerSession(handle)
         }
         if (peerOnion != null) {
             _uiState.value.richMessagesByOnion[peerOnion]?.forEach { it.wipeFromRam() }
+            processedVolatileMsgKeys.removeIf { it.startsWith("$peerOnion:") }
         }
         SessionService.stopServiceAndWipe(appContext)
         _uiState.update { state ->
@@ -1395,7 +1690,21 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
 
+        val isLoopback = TorOnionTransportManager.isLoopbackVerificationContact(contact)
+        if (!isLoopback && !TorOnionTransportManager.isPeerConnectedOnMesh(contact.onionAddress)) {
+            _uiState.update {
+                it.copy(
+                    errorBannerMessage = "Peer ${contact.alias} is not currently connected on Hotspot / Wi-Fi P2P circuit. Connect first before calling."
+                )
+            }
+            return
+        }
+
         val callId = UUID.randomUUID().toString()
+        val (ephemPriv, ephemPub) = EncryptedCallMediaEngine.generateEphemeralX25519KeyPair()
+        pendingCallPrivKey32?.let { Arrays.fill(it, 0.toByte()) }
+        pendingCallPrivKey32 = ephemPriv
+
         val initialCallState = ActiveCallUiState(
             callId = callId,
             peerAlias = contact.alias,
@@ -1404,7 +1713,8 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             mediaKind = mediaKind,
             protocolState = CallProtocolState.ROUTING_TOR_CIRCUIT,
             isIncoming = false,
-            isCameraEnabled = (mediaKind == CallMediaKind.VIDEO)
+            isCameraEnabled = (mediaKind == CallMediaKind.VIDEO),
+            isSpeakerOn = (mediaKind == CallMediaKind.VIDEO)
         )
 
         _uiState.update {
@@ -1415,13 +1725,15 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 } else {
                     ZeroTraceScreen.VOICE_CALL
                 },
-                errorBannerMessage = null
+                errorBannerMessage = null,
+                statusBannerMessage = null
             )
         }
 
         callTimerJob?.cancel()
-        callTimerJob = viewModelScope.launch {
-            delay(500)
+        callTimerJob = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val mediaPort = EncryptedCallMediaEngine.prepareCallerEphemeralListener(callId, ephemPriv)
+
             _uiState.update { state ->
                 state.copy(
                     activeCallState = state.activeCallState?.copy(
@@ -1429,7 +1741,48 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     )
                 )
             }
-            delay(600)
+
+            if (isLoopback) {
+                // Loopback test mode: derive local call key and run local audio/video capture stream
+                val handle = _uiState.value.activeSessionHandle
+                val sessionIdHex = handle?.let { RustCoreBridge.getSessionMetrics(it)?.sessionIdHex } ?: "LOOPBACK-CALL"
+                val key32 = EncryptedCallMediaEngine.deriveCallMediaKey32(ephemPriv, ephemPub, sessionIdHex, callId)
+                EncryptedCallMediaEngine.activateMediaSession(
+                    context = appContext,
+                    callId = callId,
+                    isCaller = true,
+                    derivedKey32 = key32,
+                    isVideoCall = (mediaKind == CallMediaKind.VIDEO),
+                    remoteHost = null,
+                    remoteMediaPort = null,
+                    onFallbackFrameSend = { frame ->
+                        EncryptedCallMediaEngine.processIncomingEncryptedMediaFrame(frame)
+                    }
+                )
+                Arrays.fill(key32, 0.toByte())
+                _uiState.update { state ->
+                    state.copy(
+                        activeCallState = state.activeCallState?.copy(
+                            protocolState = CallProtocolState.CONNECTED_ENCRYPTED_TOR_STREAM
+                        )
+                    )
+                }
+                runCallTimerAndTelemetryLoop(callId)
+                return@launch
+            }
+
+            val invited = TorOnionTransportManager.sendCallInvite(
+                peerOnion = contact.onionAddress,
+                callId = callId,
+                mediaKind = mediaKind,
+                mediaTcpPort = mediaPort,
+                ephemeralCallPubKey = ephemPub
+            )
+            if (!invited) {
+                cleanupCallResourcesAndReturn("Unable to deliver authenticated call invite over P2P circuit.")
+                return@launch
+            }
+
             _uiState.update { state ->
                 state.copy(
                     activeCallState = state.activeCallState?.copy(
@@ -1437,29 +1790,93 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     )
                 )
             }
-            delay(700)
-            _uiState.update { state ->
-                state.copy(
-                    activeCallState = state.activeCallState?.copy(
-                        protocolState = CallProtocolState.CONNECTED_ENCRYPTED_TOR_STREAM
-                    )
+        }
+    }
+
+    private fun handleIncomingCallInviteEvent(event: PeerTransportEvent.IncomingCallInvite) {
+        if (_uiState.value.activeCallState != null) {
+            TorOnionTransportManager.sendCallReject(event.peerOnion, event.callId, "Busy in another encrypted call")
+            return
+        }
+        val contact = _uiState.value.verifiedContacts.firstOrNull {
+            it.onionAddress.equals(event.peerOnion, ignoreCase = true)
+        }
+        val incomingState = ActiveCallUiState(
+            callId = event.callId,
+            peerAlias = contact?.alias ?: "Peer-${event.peerOnion.take(6).uppercase()}",
+            peerOnion = event.peerOnion,
+            peerSafetyDigits = contact?.classicalSafetyDigits ?: "VERIFIED-ONION-KEY",
+            mediaKind = event.mediaKind,
+            protocolState = CallProtocolState.RINGING_PEER,
+            isIncoming = true,
+            isCameraEnabled = (event.mediaKind == CallMediaKind.VIDEO),
+            isSpeakerOn = (event.mediaKind == CallMediaKind.VIDEO)
+        )
+        pendingIncomingRemoteHost = event.remoteHost ?: TorOnionTransportManager.getPeerRemoteHostAddress(event.peerOnion)
+        pendingIncomingMediaPort = event.mediaTcpPort
+        pendingIncomingRemoteEphemPub = event.ephemeralCallPubKey.copyOf()
+
+        _uiState.update {
+            it.copy(
+                activeCallState = incomingState,
+                currentScreen = ZeroTraceScreen.INCOMING_CALL,
+                errorBannerMessage = null,
+                statusBannerMessage = null
+            )
+        }
+    }
+
+    private fun handleCallAcceptedEvent(event: PeerTransportEvent.CallAccepted) {
+        val current = _uiState.value.activeCallState ?: return
+        if (current.callId != event.callId) return
+        val localPriv = pendingCallPrivKey32 ?: return
+        val handle = TorOnionTransportManager.getActiveRealPeerSessionHandle(event.peerOnion)
+            ?: _uiState.value.activeSessionHandle
+        val sessionIdHex = handle?.let { RustCoreBridge.getSessionMetrics(it)?.sessionIdHex } ?: event.callId
+
+        val derivedKey32 = EncryptedCallMediaEngine.deriveCallMediaKey32(
+            localPriv32 = localPriv,
+            remotePub32 = event.ephemeralCallPubKey,
+            sessionIdHex = sessionIdHex,
+            callId = event.callId
+        )
+        Arrays.fill(localPriv, 0.toByte())
+        pendingCallPrivKey32 = null
+
+        EncryptedCallMediaEngine.activateMediaSession(
+            context = appContext,
+            callId = event.callId,
+            isCaller = true,
+            derivedKey32 = derivedKey32,
+            isVideoCall = current.isCameraEnabled,
+            remoteHost = null,
+            remoteMediaPort = null,
+            onFallbackFrameSend = { frame ->
+                TorOnionTransportManager.sendCallMediaFallbackFrame(event.peerOnion, event.callId, frame)
+            }
+        )
+        Arrays.fill(derivedKey32, 0.toByte())
+
+        _uiState.update { state ->
+            state.copy(
+                activeCallState = state.activeCallState?.copy(
+                    protocolState = CallProtocolState.CONNECTED_ENCRYPTED_TOR_STREAM
                 )
-            }
-            while (_uiState.value.activeCallState?.protocolState == CallProtocolState.CONNECTED_ENCRYPTED_TOR_STREAM) {
-                delay(1_000L)
-                _uiState.update { state ->
-                    val current = state.activeCallState ?: return@update state
-                    state.copy(
-                        activeCallState = current.copy(
-                            elapsedSeconds = current.elapsedSeconds + 1L
-                        )
-                    )
-                }
-            }
+            )
+        }
+        callTimerJob?.cancel()
+        callTimerJob = viewModelScope.launch {
+            runCallTimerAndTelemetryLoop(event.callId)
         }
     }
 
     fun simulateIncomingEncryptedCall(contact: VerifiedContactRecord, mediaKind: CallMediaKind) {
+        val (ephemPriv, ephemPub) = EncryptedCallMediaEngine.generateEphemeralX25519KeyPair()
+        Arrays.fill(ephemPriv, 0.toByte())
+        pendingIncomingRemoteHost = null
+        pendingIncomingMediaPort = null
+        pendingIncomingRemoteEphemPub = ephemPub
+
         val incomingState = ActiveCallUiState(
             callId = UUID.randomUUID().toString(),
             peerAlias = contact.alias,
@@ -1468,7 +1885,8 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             mediaKind = mediaKind,
             protocolState = CallProtocolState.RINGING_PEER,
             isIncoming = true,
-            isCameraEnabled = (mediaKind == CallMediaKind.VIDEO)
+            isCameraEnabled = (mediaKind == CallMediaKind.VIDEO),
+            isSpeakerOn = (mediaKind == CallMediaKind.VIDEO)
         )
         _uiState.update {
             it.copy(
@@ -1480,6 +1898,15 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun acceptIncomingEncryptedCall() {
         val call = _uiState.value.activeCallState ?: return
+        val remoteEphemPub = pendingIncomingRemoteEphemPub
+        val remoteHost = pendingIncomingRemoteHost
+        val remotePort = pendingIncomingMediaPort
+
+        val (ephemPriv, ephemPub) = EncryptedCallMediaEngine.generateEphemeralX25519KeyPair()
+        val handle = TorOnionTransportManager.getActiveRealPeerSessionHandle(call.peerOnion)
+            ?: _uiState.value.activeSessionHandle
+        val sessionIdHex = handle?.let { RustCoreBridge.getSessionMetrics(it)?.sessionIdHex } ?: call.callId
+
         val connected = call.copy(protocolState = CallProtocolState.CONNECTED_ENCRYPTED_TOR_STREAM)
         _uiState.update {
             it.copy(
@@ -1491,31 +1918,86 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             )
         }
+
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            if (remoteEphemPub != null) {
+                val key32 = EncryptedCallMediaEngine.deriveCallMediaKey32(
+                    localPriv32 = ephemPriv,
+                    remotePub32 = remoteEphemPub,
+                    sessionIdHex = sessionIdHex,
+                    callId = call.callId
+                )
+                EncryptedCallMediaEngine.activateMediaSession(
+                    context = appContext,
+                    callId = call.callId,
+                    isCaller = false,
+                    derivedKey32 = key32,
+                    isVideoCall = (call.mediaKind == CallMediaKind.VIDEO),
+                    remoteHost = remoteHost,
+                    remoteMediaPort = remotePort,
+                    onFallbackFrameSend = { frame ->
+                        TorOnionTransportManager.sendCallMediaFallbackFrame(call.peerOnion, call.callId, frame)
+                    }
+                )
+                Arrays.fill(key32, 0.toByte())
+            }
+            Arrays.fill(ephemPriv, 0.toByte())
+            pendingIncomingRemoteEphemPub = null
+
+            TorOnionTransportManager.sendCallAccept(
+                peerOnion = call.peerOnion,
+                callId = call.callId,
+                mediaKind = call.mediaKind,
+                ephemeralCallPubKey = ephemPub
+            )
+        }
+
         callTimerJob?.cancel()
         callTimerJob = viewModelScope.launch {
-            while (_uiState.value.activeCallState?.protocolState == CallProtocolState.CONNECTED_ENCRYPTED_TOR_STREAM) {
-                delay(1_000L)
-                _uiState.update { state ->
-                    val current = state.activeCallState ?: return@update state
-                    state.copy(
-                        activeCallState = current.copy(elapsedSeconds = current.elapsedSeconds + 1L)
+            runCallTimerAndTelemetryLoop(call.callId)
+        }
+    }
+
+    private suspend fun runCallTimerAndTelemetryLoop(callId: String) {
+        while (_uiState.value.activeCallState?.callId == callId &&
+            _uiState.value.activeCallState?.protocolState == CallProtocolState.CONNECTED_ENCRYPTED_TOR_STREAM
+        ) {
+            delay(1_000L)
+            _uiState.update { state ->
+                val current = state.activeCallState ?: return@update state
+                if (current.callId != callId) return@update state
+                state.copy(
+                    activeCallState = current.copy(
+                        elapsedSeconds = current.elapsedSeconds + 1L,
+                        remoteAudioPacketsReceived = EncryptedCallMediaEngine.remoteAudioPackets.value,
+                        remoteVideoFramesReceived = EncryptedCallMediaEngine.remoteVideoFrames.value,
+                        isRemoteMuted = EncryptedCallMediaEngine.isRemoteMuted.value,
+                        isRemoteCameraEnabled = EncryptedCallMediaEngine.isRemoteCameraEnabled.value
                     )
-                }
+                )
             }
         }
+    }
+
+    fun submitLocalCallVideoFrame(imageProxy: ImageProxy, isFrontCamera: Boolean) {
+        EncryptedCallMediaEngine.submitLocalCameraFrame(imageProxy, isFrontCamera)
     }
 
     fun toggleCallMute() {
         _uiState.update { state ->
             val current = state.activeCallState ?: return@update state
-            state.copy(activeCallState = current.copy(isMuted = !current.isMuted))
+            val nextMute = !current.isMuted
+            EncryptedCallMediaEngine.setMuted(nextMute)
+            state.copy(activeCallState = current.copy(isMuted = nextMute))
         }
     }
 
     fun toggleCallSpeaker() {
         _uiState.update { state ->
             val current = state.activeCallState ?: return@update state
-            state.copy(activeCallState = current.copy(isSpeakerOn = !current.isSpeakerOn))
+            val nextSpeaker = !current.isSpeakerOn
+            EncryptedCallMediaEngine.setSpeakerEnabled(nextSpeaker)
+            state.copy(activeCallState = current.copy(isSpeakerOn = nextSpeaker))
         }
     }
 
@@ -1523,6 +2005,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         _uiState.update { state ->
             val current = state.activeCallState ?: return@update state
             val newCamState = !current.isCameraEnabled
+            EncryptedCallMediaEngine.setCameraEnabled(newCamState)
             state.copy(
                 activeCallState = current.copy(
                     isCameraEnabled = newCamState,
@@ -1541,7 +2024,26 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun endActiveCall() {
+        val endedCall = _uiState.value.activeCallState
+        if (endedCall != null) {
+            if (endedCall.isIncoming && endedCall.protocolState == CallProtocolState.RINGING_PEER) {
+                TorOnionTransportManager.sendCallReject(endedCall.peerOnion, endedCall.callId, "Declined")
+            } else {
+                TorOnionTransportManager.sendCallEnd(endedCall.peerOnion, endedCall.callId)
+            }
+        }
+        cleanupCallResourcesAndReturn("Encrypted call terminated & ephemeral media key zeroized from RAM.")
+    }
+
+    private fun cleanupCallResourcesAndReturn(bannerText: String) {
         callTimerJob?.cancel()
+        EncryptedCallMediaEngine.stopAndWipe()
+        pendingCallPrivKey32?.let { Arrays.fill(it, 0.toByte()) }
+        pendingCallPrivKey32 = null
+        pendingIncomingRemoteEphemPub = null
+        pendingIncomingRemoteHost = null
+        pendingIncomingMediaPort = null
+
         val endedCall = _uiState.value.activeCallState
         val newHistoryEntry = if (endedCall != null) {
             VolatileCallHistoryEntry(
@@ -1560,8 +2062,8 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             state.copy(
                 activeCallState = null,
                 callHistory = if (newHistoryEntry != null) listOf(newHistoryEntry) + state.callHistory else state.callHistory,
-                currentScreen = if (state.activeSessionHandle != null) ZeroTraceScreen.CHAT else ZeroTraceScreen.HOME,
-                statusBannerMessage = "Encrypted call terminated & ephemeral media key zeroized from RAM."
+                currentScreen = if (state.activePeerContact != null) ZeroTraceScreen.CHAT else ZeroTraceScreen.HOME,
+                statusBannerMessage = bannerText
             )
         }
     }
@@ -1581,6 +2083,12 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun triggerEmergencyLockAndWipe() {
         callTimerJob?.cancel()
+        VoiceNoteRecorder.cancelAndWipe()
+        VoiceNotePlayer.stop()
+        EncryptedCallMediaEngine.stopAndWipe()
+        pendingCallPrivKey32?.let { Arrays.fill(it, 0.toByte()) }
+        pendingCallPrivKey32 = null
+        processedVolatileMsgKeys.clear()
         wipeAllRichMessagesInRam()
         _uiState.value.ephemeralStatuses.forEach { it.wipeFromRam() }
         val wipedCount = TorOnionTransportManager.emergencyDisconnectAndWipe()
@@ -1673,6 +2181,12 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun deleteLocalIdentityPermanently() {
         callTimerJob?.cancel()
+        VoiceNoteRecorder.cancelAndWipe()
+        VoiceNotePlayer.stop()
+        EncryptedCallMediaEngine.stopAndWipe()
+        pendingCallPrivKey32?.let { Arrays.fill(it, 0.toByte()) }
+        pendingCallPrivKey32 = null
+        processedVolatileMsgKeys.clear()
         wipeAllRichMessagesInRam()
         TorOnionTransportManager.emergencyDisconnectAndWipe()
         SessionService.stopServiceAndWipe(appContext)
