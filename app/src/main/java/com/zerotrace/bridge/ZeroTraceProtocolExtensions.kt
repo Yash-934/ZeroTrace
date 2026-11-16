@@ -77,6 +77,13 @@ data class EncryptedTransferProgress(
     }
 }
 
+enum class MessageDeliveryState {
+    SENDING,
+    SENT,
+    DELIVERED,
+    READ
+}
+
 data class RichConversationMessage(
     val id: String,
     val senderLabel: String,
@@ -92,7 +99,10 @@ data class RichConversationMessage(
     val replyToSenderLabel: String? = null,
     val reactionEmoji: String? = null,
     val fileTransfer: EncryptedTransferProgress? = null,
-    val voiceDurationSeconds: Int? = null
+    val voiceDurationSeconds: Int? = null,
+    val deliveryState: MessageDeliveryState = MessageDeliveryState.SENT,
+    val wireSessionIdHex: String? = null,
+    val wireMsgNum: Long? = null
 ) {
     fun wipeFromRam() {
         fileTransfer?.wipeZeroize()

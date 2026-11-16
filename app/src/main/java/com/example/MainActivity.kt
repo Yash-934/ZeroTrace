@@ -428,16 +428,13 @@ fun ZeroTraceRootApp(
 
         ZeroTraceScreen.STATUS_VIEWER -> {
             ZeroTraceStatusViewerScreen(
-                statusItem = uiState.activeViewingStatus,
+                statuses = uiState.activeViewingStatuses,
+                currentIndex = uiState.activeViewingStatusIndex,
+                fallbackStatus = uiState.activeViewingStatus,
+                onStepStatus = viewModel::stepViewingStatus,
                 onBack = { viewModel.navigateBack() },
                 onReplyToStatus = { statusItem, replyText ->
-                    val matchingContact = uiState.verifiedContacts.find {
-                        it.onionAddress.equals(statusItem.authorOnion, ignoreCase = true)
-                    }
-                    viewModel.navigateBack()
-                    if (matchingContact != null) {
-                        viewModel.startAuthenticatedSessionWithContact(matchingContact)
-                    }
+                    viewModel.sendStatusReplyToPeer(statusItem, replyText)
                 },
                 onSaveStatusToGallery = viewModel::saveStatusMediaToGallery,
                 onDeleteOwnStatus = viewModel::deleteEphemeralStatus

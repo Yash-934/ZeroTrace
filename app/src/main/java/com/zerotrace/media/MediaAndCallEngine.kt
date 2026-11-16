@@ -9,14 +9,18 @@ import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.YuvImage
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.net.Uri
+import android.os.Build
 import android.provider.OpenableColumns
 import androidx.camera.core.ImageProxy
 import com.zerotrace.bridge.EncryptedFileTransferEngine
@@ -580,19 +584,24 @@ object EncryptedCallMediaEngine {
     private var audioTrack: AudioTrack? = null
     private var echoCanceler: AcousticEchoCanceler? = null
     private var noiseSuppressor: NoiseSuppressor? = null
+    private var autoGainControl: AutomaticGainControl? = null
     private var appAudioManager: AudioManager? = null
+    private var activeAudioFocusRequest: AudioFocusRequest? = null
 
     private var writerJob: Job? = null
     private var readerJob: Job? = null
     private var audioCaptureJob: Job? = null
 
     private val isActive = AtomicBoolean(false)
+    private val allowSelfLoopbackFlag = AtomicBoolean(false)
     private val isMutedFlag = AtomicBoolean(false)
     private val isVideoEnabledFlag = AtomicBoolean(false)
     private val audioSendSeq = AtomicLong(0L)
     private val videoSendSeq = AtomicLong(0L)
     private val controlSendSeq = AtomicLong(0L)
     private val lastVideoFrameSentMs = AtomicLong(0L)
+    private val lastRemoteAudioPlayMs = AtomicLong(0L)
+    private val lastRemoteAudioRms = AtomicLong(0L)
 
     // Priority queues: Audio always preempts bounded drop-oldest Video queue
     private val audioQueue = ArrayBlockingQueue<ByteArray>(32)
@@ -680,6 +689,7 @@ object EncryptedCallMediaEngine {
         isVideoCall: Boolean,
         remoteHost: String?,
         remoteMediaPort: Int?,
+        allowSelfLoopback: Boolean = false,
         onFallbackFrameSend: (ByteArray) -> Unit
     ) {
         if (activeCallId != callId) {
@@ -687,6 +697,7 @@ object EncryptedCallMediaEngine {
         }
         activeCallId = callId
         localDirectionBit = if (isCaller) 0x01 else 0x02
+        allowSelfLoopbackFlag.set(allowSelfLoopback)
         callMediaKey32?.let { Arrays.fill(it, 0.toByte()) }
         callMediaKey32 = derivedKey32.copyOf()
         fallbackSender = onFallbackFrameSend
@@ -695,6 +706,8 @@ object EncryptedCallMediaEngine {
         audioSendSeq.set(0L)
         videoSendSeq.set(0L)
         controlSendSeq.set(0L)
+        lastRemoteAudioPlayMs.set(0L)
+        lastRemoteAudioRms.set(0L)
         _remoteAudioPackets.value = 0L
         _remoteVideoFrames.value = 0L
         _isRemoteMuted.value = false
@@ -710,8 +723,28 @@ object EncryptedCallMediaEngine {
 
         appAudioManager = (context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager)?.also { am ->
             try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                        .setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .build()
+                        )
+                        .build()
+                    activeAudioFocusRequest = req
+                    am.requestAudioFocus(req)
+                } else {
+                    @Suppress("DEPRECATION")
+                    am.requestAudioFocus(
+                        null,
+                        AudioManager.STREAM_VOICE_CALL,
+                        AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
+                    )
+                }
                 am.mode = AudioManager.MODE_IN_COMMUNICATION
-                am.isSpeakerphoneOn = isVideoCall
+                val hasExternalHeadset = hasWiredOrBluetoothHeadset(am)
+                am.isSpeakerphoneOn = isVideoCall && !hasExternalHeadset
             } catch (_: Throwable) {
             }
         }
@@ -857,43 +890,55 @@ object EncryptedCallMediaEngine {
         }
     }
 
+    private fun hasWiredOrBluetoothHeadset(am: AudioManager): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { dev ->
+                    dev.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                        dev.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                        dev.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                        dev.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                        dev.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
+                        dev.type == AudioDeviceInfo.TYPE_BLE_HEADSET
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                am.isWiredHeadsetOn || am.isBluetoothScoOn
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun computePcm16Rms(pcmBytes: ByteArray, length: Int): Long {
+        if (length < 2) return 0L
+        var sumSq = 0.0
+        var samples = 0
+        var i = 0
+        while (i + 1 < length) {
+            val sample = ((pcmBytes[i + 1].toInt() shl 8) or (pcmBytes[i].toInt() and 0xFF)).toShort().toDouble()
+            sumSq += sample * sample
+            samples++
+            i += 2
+        }
+        return if (samples == 0) 0L else kotlin.math.sqrt(sumSq / samples).toLong()
+    }
+
+    private fun applyGainInPlace(pcmBytes: ByteArray, length: Int, gain: Float) {
+        if (gain >= 0.99f) return
+        var i = 0
+        while (i + 1 < length) {
+            val raw = ((pcmBytes[i + 1].toInt() shl 8) or (pcmBytes[i].toInt() and 0xFF)).toShort().toFloat()
+            val scaled = (raw * gain).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+            pcmBytes[i] = (scaled and 0xFF).toByte()
+            pcmBytes[i + 1] = ((scaled ushr 8) and 0xFF).toByte()
+            i += 2
+        }
+    }
+
     @SuppressLint("MissingPermission")
     private fun startAudioCaptureAndPlayback() {
-        // Initialize low-latency AudioTrack for incoming voice
-        val playMinBuf = AudioTrack.getMinBufferSize(
-            AUDIO_SAMPLE_RATE,
-            AudioFormat.CHANNEL_OUT_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(AUDIO_FRAME_BYTES * 2)
-
-        val track = try {
-            AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(AUDIO_SAMPLE_RATE)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                        .build()
-                )
-                .setBufferSizeInBytes(playMinBuf * 2)
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
-        } catch (_: Throwable) {
-            null
-        }
-        audioTrack = track
-        try {
-            track?.play()
-        } catch (_: Throwable) {
-        }
-
-        // Initialize AudioRecord with hardware AEC + NoiseSuppressor
+        // Initialize AudioRecord FIRST so we can share its audioSessionId with AudioTrack + DSP effects
         val recMinBuf = AudioRecord.getMinBufferSize(
             AUDIO_SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO,
@@ -912,6 +957,53 @@ object EncryptedCallMediaEngine {
             null
         }
 
+        val sessionId = if (rec != null && rec.state == AudioRecord.STATE_INITIALIZED) {
+            rec.audioSessionId
+        } else {
+            AudioManager.AUDIO_SESSION_ID_GENERATE
+        }
+
+        // Initialize low-latency AudioTrack bound to the same voice-communication sessionId for hardware AEC
+        val playMinBuf = AudioTrack.getMinBufferSize(
+            AUDIO_SAMPLE_RATE,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        ).coerceAtLeast(AUDIO_FRAME_BYTES * 2)
+
+        fun createTrack(boundSessionId: Int): AudioTrack? {
+            return try {
+                val builder = AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(AUDIO_SAMPLE_RATE)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(playMinBuf * 2)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                if (boundSessionId != AudioManager.AUDIO_SESSION_ID_GENERATE && boundSessionId > 0) {
+                    builder.setSessionId(boundSessionId)
+                }
+                builder.build()
+            } catch (_: Throwable) {
+                null
+            }
+        }
+
+        val track = createTrack(sessionId) ?: createTrack(AudioManager.AUDIO_SESSION_ID_GENERATE)
+        audioTrack = track
+        try {
+            track?.play()
+        } catch (_: Throwable) {
+        }
+
         if (rec != null && rec.state == AudioRecord.STATE_INITIALIZED) {
             audioRecord = rec
             try {
@@ -921,9 +1013,13 @@ object EncryptedCallMediaEngine {
                 if (NoiseSuppressor.isAvailable()) {
                     noiseSuppressor = NoiseSuppressor.create(rec.audioSessionId)?.apply { enabled = true }
                 }
+                if (AutomaticGainControl.isAvailable()) {
+                    autoGainControl = AutomaticGainControl.create(rec.audioSessionId)?.apply { enabled = true }
+                }
             } catch (_: Throwable) {
             }
 
+            val hwAecActive = echoCanceler?.enabled == true
             audioCaptureJob?.cancel()
             audioCaptureJob = scope.launch {
                 val pcmFrame = ByteArray(AUDIO_FRAME_BYTES)
@@ -932,6 +1028,29 @@ object EncryptedCallMediaEngine {
                     while (isActive.get()) {
                         val read = rec.read(pcmFrame, 0, pcmFrame.size)
                         if (read > 0 && !isMutedFlag.get()) {
+                            // Software echo-suppression assist: if peer audio just played on speaker/earpiece,
+                            // duck residual speaker-to-mic bleed so the caller never hears their own voice repeat back.
+                            val nowMs = System.currentTimeMillis()
+                            val remoteRecent = (nowMs - lastRemoteAudioPlayMs.get()) < 320L
+                            val remoteRms = lastRemoteAudioRms.get()
+                            if (remoteRecent && remoteRms > 300L) {
+                                val localRms = computePcm16Rms(pcmFrame, read)
+                                val speakerOn = try {
+                                    appAudioManager?.isSpeakerphoneOn == true
+                                } catch (_: Throwable) {
+                                    false
+                                }
+                                val bleedThreshold = when {
+                                    !hwAecActive && speakerOn -> maxOf(750L, (remoteRms * 0.65).toLong())
+                                    !hwAecActive -> maxOf(500L, (remoteRms * 0.45).toLong())
+                                    speakerOn -> maxOf(420L, (remoteRms * 0.35).toLong())
+                                    else -> maxOf(280L, (remoteRms * 0.22).toLong())
+                                }
+                                if (localRms < bleedThreshold) {
+                                    applyGainInPlace(pcmFrame, read, if (!hwAecActive) 0.05f else 0.14f)
+                                }
+                            }
+
                             val slice = if (read == pcmFrame.size) pcmFrame else pcmFrame.copyOf(read)
                             val encrypted = buildEncryptedMediaFrame(
                                 streamId = STREAM_AUDIO,
@@ -1190,6 +1309,7 @@ object EncryptedCallMediaEngine {
             DataInputStream(ByteArrayInputStream(frameBytes)).use { inp ->
                 if (inp.readInt() != MEDIA_FRAME_MAGIC) return
                 val senderDirBit = inp.readByte()
+                if (!allowSelfLoopbackFlag.get() && senderDirBit == localDirectionBit) return
                 val streamId = inp.readByte()
                 val seq = inp.readLong()
                 val ctLen = inp.readInt()
@@ -1208,6 +1328,11 @@ object EncryptedCallMediaEngine {
                 when (streamId) {
                     STREAM_AUDIO -> {
                         _remoteAudioPackets.value = _remoteAudioPackets.value + 1L
+                        val rms = computePcm16Rms(pt, pt.size)
+                        if (rms > 150L) {
+                            lastRemoteAudioPlayMs.set(System.currentTimeMillis())
+                            lastRemoteAudioRms.set(rms)
+                        }
                         val track = audioTrack
                         if (track != null && pt.isNotEmpty()) {
                             track.write(pt, 0, pt.size)
@@ -1261,8 +1386,13 @@ object EncryptedCallMediaEngine {
             noiseSuppressor?.release()
         } catch (_: Throwable) {
         }
+        try {
+            autoGainControl?.release()
+        } catch (_: Throwable) {
+        }
         echoCanceler = null
         noiseSuppressor = null
+        autoGainControl = null
 
         try {
             audioRecord?.stop()
@@ -1292,10 +1422,16 @@ object EncryptedCallMediaEngine {
         fallbackSender = null
 
         try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                activeAudioFocusRequest?.let { req ->
+                    appAudioManager?.abandonAudioFocusRequest(req)
+                }
+            }
             appAudioManager?.mode = AudioManager.MODE_NORMAL
             appAudioManager?.isSpeakerphoneOn = false
         } catch (_: Throwable) {
         }
+        activeAudioFocusRequest = null
         appAudioManager = null
 
         callMediaKey32?.let { Arrays.fill(it, 0.toByte()) }

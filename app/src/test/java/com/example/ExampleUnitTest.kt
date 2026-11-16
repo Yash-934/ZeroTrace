@@ -758,6 +758,77 @@ class ExampleUnitTest {
         )
         assertArrayEquals(expected, nv21)
     }
+
+    @Test
+    fun richConversationMessage_tracksDeliveryAndReadTickProgression() {
+        val msg = com.zerotrace.bridge.RichConversationMessage(
+            id = "m-tick-1",
+            senderLabel = "You",
+            bodyText = "Encrypted hello",
+            timestampEpochMillis = 1_700_000_000_000L,
+            isOutgoing = true,
+            ratchetStepIndex = 1,
+            pqEpoch = 1,
+            pqBraidAdvanced = false,
+            deliveryState = com.zerotrace.bridge.MessageDeliveryState.SENDING,
+            wireSessionIdHex = "abcd1234",
+            wireMsgNum = 0L
+        )
+        assertEquals(com.zerotrace.bridge.MessageDeliveryState.SENDING, msg.deliveryState)
+        val sent = msg.copy(deliveryState = com.zerotrace.bridge.MessageDeliveryState.SENT)
+        val delivered = sent.copy(deliveryState = com.zerotrace.bridge.MessageDeliveryState.DELIVERED)
+        val read = delivered.copy(deliveryState = com.zerotrace.bridge.MessageDeliveryState.READ)
+        assertEquals(com.zerotrace.bridge.MessageDeliveryState.SENT, sent.deliveryState)
+        assertEquals(com.zerotrace.bridge.MessageDeliveryState.DELIVERED, delivered.deliveryState)
+        assertEquals(com.zerotrace.bridge.MessageDeliveryState.READ, read.deliveryState)
+    }
+
+    @Test
+    fun ephemeralStatuses_groupByAuthorAndCountUnreadWithin24h() {
+        val now = 1_700_000_000_000L
+        val items = listOf(
+            com.zerotrace.bridge.EphemeralStatusItem(
+                statusId = "s1",
+                authorAlias = "Kapil",
+                authorOnion = "kapil123456.onion",
+                isOwnStatus = false,
+                mediaType = com.zerotrace.bridge.StatusMediaType.IMAGE_CARD,
+                captionText = "First",
+                backgroundHex = "#000000",
+                createdAtEpochMillis = now - 30_000L,
+                viewedByLocalUser = true
+            ),
+            com.zerotrace.bridge.EphemeralStatusItem(
+                statusId = "s2",
+                authorAlias = "Kapil",
+                authorOnion = "KAPIL123456.onion",
+                isOwnStatus = false,
+                mediaType = com.zerotrace.bridge.StatusMediaType.TEXT_CARD,
+                captionText = "Second unread",
+                backgroundHex = "#075E54",
+                createdAtEpochMillis = now - 10_000L,
+                viewedByLocalUser = false
+            ),
+            com.zerotrace.bridge.EphemeralStatusItem(
+                statusId = "s_expired",
+                authorAlias = "Kapil",
+                authorOnion = "kapil123456.onion",
+                isOwnStatus = false,
+                mediaType = com.zerotrace.bridge.StatusMediaType.TEXT_CARD,
+                captionText = "Old",
+                backgroundHex = "#075E54",
+                createdAtEpochMillis = now - com.zerotrace.bridge.STATUS_TTL_24H_MS - 1_000L,
+                viewedByLocalUser = false
+            )
+        )
+
+        val active = items.filterNot { it.isExpired(now) }
+        val grouped = active.groupBy { it.authorOnion.lowercase() }
+        assertEquals(1, grouped.size)
+        val kapilGroup = grouped["kapil123456.onion"]!!
+        assertEquals(2, kapilGroup.size)
+        assertEquals(1, kapilGroup.count { !it.viewedByLocalUser })
+    }
 }
 
 

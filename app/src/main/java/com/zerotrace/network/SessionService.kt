@@ -7,6 +7,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
@@ -52,6 +54,8 @@ import java.security.SecureRandomSpi
 import java.util.Arrays
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -161,6 +165,11 @@ sealed interface PeerTransportEvent {
         val sessionIdHex: String,
         val msgNum: Long,
         val ratchetEpoch: Int
+    ) : PeerTransportEvent
+
+    data class ReadReceipt(
+        val peerOnion: String,
+        val readUpToEpochMillis: Long
     ) : PeerTransportEvent
 
     data class IncomingCallInvite(
@@ -366,6 +375,8 @@ object TorOnionTransportManager {
     private const val FRAME_DELIVERY_ACK: Byte = 0x04
     private const val FRAME_SESSION_RESET: Byte = 0x05
     private const val FRAME_MEDIA_CHUNK: Byte = 0x06
+    private const val FRAME_READ_RECEIPT: Byte = 0x07
+    private const val FRAME_KEEPALIVE: Byte = 0x08
     private const val FRAME_PEER_HELLO: Byte = 0x10
     private const val FRAME_CALL_INVITE: Byte = 0x20
     private const val FRAME_CALL_ACCEPT: Byte = 0x21
@@ -454,11 +465,126 @@ object TorOnionTransportManager {
     private val connectingEndpoints = ConcurrentHashMap.newKeySet<String>()
     private val incomingMediaChunksByTransferId = ConcurrentHashMap<String, ConcurrentHashMap<Int, EncryptedFileChunk>>()
 
+    private val networkCallbackRegistered = AtomicBoolean(false)
+    private val lastActiveNetworkHandle = AtomicLong(-1L)
+    private var registeredNetworkCallback: ConnectivityManager.NetworkCallback? = null
+    private val trackedVerifiedPeerOnions = ConcurrentHashMap.newKeySet<String>()
+    private val backgroundDialingPeers = ConcurrentHashMap.newKeySet<String>()
+    private var backgroundReconnectJob: Job? = null
+
     @Volatile
     private var loopbackPeerNode: LoopbackCryptographicPeerNode? = null
 
     fun initializePlatform(context: Context) {
-        appContextRef = context.applicationContext
+        val appCtx = context.applicationContext
+        appContextRef = appCtx
+        registerNetworkCallbackIfNeeded(appCtx)
+    }
+
+    fun registerVerifiedPeerOnions(onions: Collection<String>) {
+        val localOnion = RustCoreBridge.getPublicIdentitySummary()?.onionAddress?.lowercase()
+        val loopbackOnion = loopbackPeerNode?.onionAddress?.lowercase()
+        for (raw in onions) {
+            val clean = raw.trim().lowercase()
+            if (clean.endsWith(".onion") && clean != localOnion && clean != loopbackOnion) {
+                trackedVerifiedPeerOnions.add(clean)
+            }
+        }
+    }
+
+    private fun registerNetworkCallbackIfNeeded(appCtx: Context) {
+        if (!isAndroidDeviceRuntime || !networkCallbackRegistered.compareAndSet(false, true)) return
+        try {
+            val cm = appCtx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    val newHandle = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        network.networkHandle
+                    } else {
+                        network.hashCode().toLong()
+                    }
+                    val prevHandle = lastActiveNetworkHandle.getAndSet(newHandle)
+                    if (prevHandle == -1L || prevHandle == newHandle) {
+                        // First network observation — just warm Tor if already ready
+                        return
+                    }
+                    // Network changed (Wi-Fi A <-> Wi-Fi B or Wi-Fi <-> Mobile Data): recover immediately!
+                    scope.launch {
+                        handlePlatformNetworkSwitch()
+                    }
+                }
+
+                override fun onLost(network: Network) {
+                    val lostHandle = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        network.networkHandle
+                    } else {
+                        network.hashCode().toLong()
+                    }
+                    if (lastActiveNetworkHandle.get() == lostHandle) {
+                        scope.launch {
+                            delay(800L)
+                            if (isAndroidDeviceRuntime && livePeerChannels.isNotEmpty()) {
+                                livePeerChannels.values.toList().forEach { ch ->
+                                    try {
+                                        if (!ch.isAlive()) {
+                                            livePeerChannels.remove(ch.peerOnion, ch)
+                                        }
+                                    } catch (_: Throwable) {
+                                    }
+                                }
+                                refreshConnectedPeerState()
+                            }
+                        }
+                    }
+                }
+            }
+            registeredNetworkCallback = cb
+            cm.registerDefaultNetworkCallback(cb)
+        } catch (_: Throwable) {
+            networkCallbackRegistered.set(false)
+        }
+    }
+
+    private suspend fun handlePlatformNetworkSwitch() = withContext(Dispatchers.IO) {
+        if (!isAndroidDeviceRuntime) return@withContext
+        // Drop stale sockets opened over the previous network interface so Tor / P2P reconnects cleanly
+        val staleEntries = livePeerChannels.entries.toList()
+        for ((onion, ch) in staleEntries) {
+            livePeerChannels.remove(onion, ch)
+            ch.closeQuietly()
+        }
+        discoveredPeerAddresses.clear()
+        refreshConnectedPeerState()
+
+        val backend = _transportBackend.value
+        if (backend == TorTransportBackend.EMBEDDED_TOR) {
+            val state = _connectivityState.value
+            if (state == ConnectivityState.OFFLINE || state == ConnectivityState.ERROR) {
+                bootstrapTorAndStartOnionService()
+            } else {
+                val recovered = EmbeddedTorEngine.onNetworkChanged(
+                    virtualOnionPort = DEFAULT_P2P_TCP_PORT,
+                    localListenPort = p2pMeshListeningPort,
+                    torAddOnionPrivateKeyParam = RustCoreBridge.exportTorAddOnionPrivateKeyBlob(),
+                    expectedOnionAddress = RustCoreBridge.getPublicIdentitySummary()?.onionAddress
+                )
+                if (!recovered) {
+                    bootstrapTorAndStartOnionService()
+                }
+            }
+        }
+
+        // Probe any LAN peers immediately AND reconnect verified Tor peers over the new network
+        try {
+            broadcastUdpBeaconAndProbeGateways()
+        } catch (_: Throwable) {
+        }
+        delay(600L)
+        for (peerOnion in trackedVerifiedPeerOnions) {
+            if (!isPeerConnectedOnMesh(peerOnion)) {
+                launchBackgroundPeerDial(peerOnion)
+            }
+        }
     }
 
     fun configureTransportBackend(backend: TorTransportBackend, customSocksPort: Int = 9050) {
@@ -609,6 +735,9 @@ object TorOnionTransportManager {
                     ConnectivityState.E2EE_SESSION_READY
                 } else {
                     ConnectivityState.ONION_SERVICE_READY
+                }
+                if (isAndroidDeviceRuntime) {
+                    ensureBackgroundPeerReconnectLoop()
                 }
                 jobDeferred.complete(true)
                 true
@@ -1159,6 +1288,23 @@ object TorOnionTransportManager {
             }
         }
 
+        fun sendReadReceipt(readUpToEpochMillis: Long) {
+            synchronized(writeLock) {
+                out.writeInt(WIRE_MAGIC)
+                out.writeByte(FRAME_READ_RECEIPT.toInt())
+                out.writeLong(readUpToEpochMillis)
+                out.flush()
+            }
+        }
+
+        fun sendKeepalive() {
+            synchronized(writeLock) {
+                out.writeInt(WIRE_MAGIC)
+                out.writeByte(FRAME_KEEPALIVE.toInt())
+                out.flush()
+            }
+        }
+
         fun sendCallInviteFrame(
             callId: String,
             mediaKind: CallMediaKind,
@@ -1251,6 +1397,7 @@ object TorOnionTransportManager {
 
     private suspend fun handlePeerSocketConnection(socket: Socket, isOutbound: Boolean) {
         var registeredChannel: PeerSocketChannel? = null
+        var keepaliveJob: Job? = null
         var peerOnion = ""
         try {
             socket.tcpNoDelay = true
@@ -1321,6 +1468,20 @@ object TorOnionTransportManager {
                 }
             }
 
+            // Keep cellular NATs and Tor circuit streams warm across idle intervals
+            keepaliveJob = scope.launch {
+                while (channel.isAlive()) {
+                    delay(22_000L)
+                    if (!channel.isAlive()) break
+                    try {
+                        channel.sendKeepalive()
+                    } catch (_: Throwable) {
+                        channel.closeQuietly()
+                        break
+                    }
+                }
+            }
+
             // Continuous frame reader loop on this channel
             while (channel.isAlive()) {
                 val frameMagic = inp.readInt()
@@ -1368,6 +1529,11 @@ object TorOnionTransportManager {
                         val chunkMap = incomingMediaChunksByTransferId.getOrPut(transferId) { ConcurrentHashMap() }
                         chunkMap[chunkIdx] = EncryptedFileChunk(chunkIdx, nonce12, ct)
                     }
+                    FRAME_READ_RECEIPT -> {
+                        val readUpTo = inp.readLong()
+                        _peerTransportEvents.tryEmit(PeerTransportEvent.ReadReceipt(peerOnion, readUpTo))
+                    }
+                    FRAME_KEEPALIVE -> Unit
                     FRAME_CALL_INVITE -> {
                         val callId = inp.readUTF()
                         val kind = try {
@@ -1455,6 +1621,7 @@ object TorOnionTransportManager {
             }
         } catch (_: Throwable) {
         } finally {
+            keepaliveJob?.cancel()
             if (registeredChannel != null && peerOnion.isNotEmpty()) {
                 livePeerChannels.remove(peerOnion, registeredChannel)
                 refreshConnectedPeerState()
@@ -1769,18 +1936,11 @@ object TorOnionTransportManager {
                     var torDialError: String? = null
                     val torDialJob = if (activeSocksPort != null && activeSocksPort > 0) {
                         scope.launch {
-                            try {
-                                val torSock = EmbeddedTorEngine.connectToOnionOverSocks5(
-                                    peerOnion = peerOnion,
-                                    targetPort = DEFAULT_P2P_TCP_PORT,
-                                    socksHost = socksHost,
-                                    socksPort = activeSocksPort,
-                                    connectTimeoutMs = 45_000
-                                )
-                                handlePeerSocketConnection(torSock, isOutbound = true)
-                            } catch (t: Throwable) {
-                                torDialError = t.message
-                            }
+                            torDialError = dialPeerOverTorWithRetry(
+                                peerOnion = peerOnion,
+                                socksPortToUse = activeSocksPort,
+                                maxBudgetMs = 46_000L
+                            )
                         }
                     } else null
 
@@ -1789,7 +1949,8 @@ object TorOnionTransportManager {
                         while (true) {
                             val ch = livePeerChannels[peerOnion]?.takeIf { it.isAlive() }
                             if (ch != null) return@withTimeoutOrNull ch
-                            if (torDialJob != null && torDialJob.isCompleted && sweepJob.isCompleted) {
+                            val torDone = torDialJob == null || torDialJob.isCompleted
+                            if (torDone && sweepJob.isCompleted) {
                                 delay(250L)
                                 val chAfter = livePeerChannels[peerOnion]?.takeIf { it.isAlive() }
                                 if (chAfter != null) return@withTimeoutOrNull chAfter
@@ -1992,16 +2153,111 @@ object TorOnionTransportManager {
     suspend fun sendEncryptedMediaChunks(
         peerOnion: String,
         transferId: String,
-        chunks: List<EncryptedFileChunk>
+        chunks: List<EncryptedFileChunk>,
+        onChunkProgress: ((chunksSent: Int, totalChunks: Int) -> Unit)? = null
     ): Boolean = withContext(Dispatchers.IO) {
         val channel = livePeerChannels[peerOnion.lowercase()]?.takeIf { it.isAlive() } ?: return@withContext false
+        val total = chunks.size
         return@withContext try {
-            for (chunk in chunks) {
+            chunks.forEachIndexed { idx, chunk ->
                 channel.sendMediaChunk(transferId, chunk)
+                onChunkProgress?.invoke(idx + 1, total)
             }
             true
         } catch (_: Throwable) {
             false
+        }
+    }
+
+    fun sendReadReceipt(peerOnion: String, readUpToEpochMillis: Long = System.currentTimeMillis()) {
+        val key = peerOnion.lowercase()
+        val ch = livePeerChannels[key]?.takeIf { it.isAlive() } ?: return
+        scope.launch {
+            try {
+                ch.sendReadReceipt(readUpToEpochMillis)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private suspend fun dialPeerOverTorWithRetry(
+        peerOnion: String,
+        socksPortToUse: Int,
+        maxBudgetMs: Long
+    ): String? {
+        val cleanOnion = peerOnion.trim().lowercase()
+        val deadline = System.currentTimeMillis() + maxBudgetMs
+        var attempt = 0
+        var lastError: String? = null
+        if (_transportBackend.value == TorTransportBackend.EMBEDDED_TOR) {
+            EmbeddedTorEngine.prefetchOnionDescriptor(cleanOnion)
+        }
+        while (System.currentTimeMillis() < deadline && !isPeerConnectedOnMesh(cleanOnion)) {
+            attempt++
+            val remainingMs = (deadline - System.currentTimeMillis()).coerceAtLeast(5_000L)
+            val attemptTimeoutMs = minOf(remainingMs.toInt(), if (attempt == 1) 18_000 else 25_000)
+            try {
+                val torSock = EmbeddedTorEngine.connectToOnionOverSocks5(
+                    peerOnion = cleanOnion,
+                    targetPort = DEFAULT_P2P_TCP_PORT,
+                    socksHost = socksHost,
+                    socksPort = socksPortToUse,
+                    connectTimeoutMs = attemptTimeoutMs
+                )
+                handlePeerSocketConnection(torSock, isOutbound = true)
+                return null
+            } catch (t: Throwable) {
+                lastError = t.message ?: t.javaClass.simpleName
+                if (isPeerConnectedOnMesh(cleanOnion)) return null
+                if (_transportBackend.value == TorTransportBackend.EMBEDDED_TOR) {
+                    EmbeddedTorEngine.prefetchOnionDescriptor(cleanOnion)
+                }
+                val backoffMs = minOf(2_500L, 1_100L + attempt * 350L)
+                if (System.currentTimeMillis() + backoffMs >= deadline) break
+                delay(backoffMs)
+            }
+        }
+        return lastError
+    }
+
+    private fun launchBackgroundPeerDial(peerOnion: String) {
+        val clean = peerOnion.trim().lowercase()
+        if (!clean.endsWith(".onion") || isPeerConnectedOnMesh(clean)) return
+        if (!backgroundDialingPeers.add(clean)) return
+        scope.launch {
+            try {
+                val activeSocks = when (_transportBackend.value) {
+                    TorTransportBackend.EMBEDDED_TOR -> EmbeddedTorEngine.getActiveSocksPort()
+                    TorTransportBackend.SOCKS5_TOR_DAEMON -> _activeTorSocksPort.value
+                    TorTransportBackend.LOOPBACK_ONION_VERIFICATION -> null
+                } ?: return@launch
+                if (activeSocks <= 0) return@launch
+                dialPeerOverTorWithRetry(
+                    peerOnion = clean,
+                    socksPortToUse = activeSocks,
+                    maxBudgetMs = 24_000L
+                )
+            } finally {
+                backgroundDialingPeers.remove(clean)
+            }
+        }
+    }
+
+    private fun ensureBackgroundPeerReconnectLoop() {
+        if (!isAndroidDeviceRuntime) return
+        if (backgroundReconnectJob?.isActive == true) return
+        backgroundReconnectJob = scope.launch {
+            while (true) {
+                delay(8_000L)
+                val state = _connectivityState.value
+                val ready = state == ConnectivityState.ONION_SERVICE_READY || state == ConnectivityState.E2EE_SESSION_READY
+                if (!ready) continue
+                for (peerOnion in trackedVerifiedPeerOnions) {
+                    if (!isPeerConnectedOnMesh(peerOnion)) {
+                        launchBackgroundPeerDial(peerOnion)
+                    }
+                }
+            }
         }
     }
 
@@ -2304,6 +2560,9 @@ object TorOnionTransportManager {
         loopbackPeerNode = null
         p2pDiscoveryJob?.cancel()
         p2pDiscoveryJob = null
+        backgroundReconnectJob?.cancel()
+        backgroundReconnectJob = null
+        backgroundDialingPeers.clear()
         try {
             localOnionServerSocket?.close()
         } catch (_: Exception) {

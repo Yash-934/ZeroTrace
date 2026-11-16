@@ -3,6 +3,7 @@ package com.zerotrace.ui.components
 import android.graphics.BitmapFactory
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -30,6 +31,7 @@ import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Call
@@ -40,6 +42,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContactPage
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.EmojiEmotions
@@ -96,7 +99,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
@@ -107,6 +112,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.zerotrace.bridge.EphemeralStatusItem
+import com.zerotrace.bridge.MessageDeliveryState
 import com.zerotrace.bridge.MessagePayloadKind
 import com.zerotrace.bridge.RichConversationMessage
 import com.zerotrace.bridge.StatusMediaType
@@ -495,6 +501,8 @@ fun ContactAvatar(
     isVerified: Boolean = true,
     isOnlineOrSessionActive: Boolean = false,
     hasActiveStatusRing: Boolean = false,
+    statusSegmentCount: Int = 0,
+    unseenStatusSegmentCount: Int = 0,
     size: Dp = 50.dp,
     modifier: Modifier = Modifier
 ) {
@@ -514,10 +522,55 @@ fun ContactAvatar(
         .joinToString("") { it.take(1).uppercase() }
         .ifEmpty { "ZT" }
 
+    val showSegmentedRing = statusSegmentCount > 0 || hasActiveStatusRing
+    val totalSegments = if (statusSegmentCount > 0) statusSegmentCount else if (hasActiveStatusRing) 1 else 0
+    val unseenSegments = if (statusSegmentCount > 0) unseenStatusSegmentCount.coerceIn(0, totalSegments) else if (hasActiveStatusRing) 1 else 0
+    val viewedRingColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+    val innerSize = if (showSegmentedRing) (size - 7.dp).coerceAtLeast(24.dp) else size
+
     Box(modifier = modifier.size(size), contentAlignment = Alignment.Center) {
+        if (showSegmentedRing && totalSegments > 0) {
+            Canvas(modifier = Modifier.size(size)) {
+                val strokePx = 2.4.dp.toPx()
+                val inset = strokePx / 2f
+                val arcSize = androidx.compose.ui.geometry.Size(
+                    width = this.size.width - strokePx,
+                    height = this.size.height - strokePx
+                )
+                val topLeft = androidx.compose.ui.geometry.Offset(inset, inset)
+                if (totalSegments == 1) {
+                    drawArc(
+                        color = if (unseenSegments > 0) ZeroTraceEmerald else viewedRingColor,
+                        startAngle = 0f,
+                        sweepAngle = 360f,
+                        useCenter = false,
+                        topLeft = topLeft,
+                        size = arcSize,
+                        style = Stroke(width = strokePx, cap = StrokeCap.Round)
+                    )
+                } else {
+                    val gapDeg = if (totalSegments > 8) 6f else 10f
+                    val sweepDeg = ((360f - gapDeg * totalSegments) / totalSegments).coerceAtLeast(6f)
+                    for (segIdx in 0 until totalSegments) {
+                        val startAngle = -90f + segIdx * (sweepDeg + gapDeg) + gapDeg / 2f
+                        val segColor = if (segIdx < unseenSegments) ZeroTraceEmerald else viewedRingColor
+                        drawArc(
+                            color = segColor,
+                            startAngle = startAngle,
+                            sweepAngle = sweepDeg,
+                            useCenter = false,
+                            topLeft = topLeft,
+                            size = arcSize,
+                            style = Stroke(width = strokePx, cap = StrokeCap.Round)
+                        )
+                    }
+                }
+            }
+        }
+
         Box(
             modifier = Modifier
-                .size(size)
+                .size(innerSize)
                 .clip(CircleShape)
                 .background(
                     Brush.linearGradient(
@@ -528,8 +581,8 @@ fun ContactAvatar(
                     )
                 )
                 .border(
-                    width = if (hasActiveStatusRing) 2.5.dp else 1.2.dp,
-                    color = if (hasActiveStatusRing) ZeroTraceEmerald else baseColor.copy(alpha = 0.55f),
+                    width = 1.dp,
+                    color = baseColor.copy(alpha = 0.45f),
                     shape = CircleShape
                 ),
             contentAlignment = Alignment.Center
@@ -552,7 +605,7 @@ fun ContactAvatar(
                     .clip(CircleShape)
                     .background(ZeroTraceEmerald)
             )
-        } else if (isVerified) {
+        } else if (isVerified && !showSegmentedRing) {
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
@@ -904,8 +957,18 @@ fun MessageBubble(
                             ) {
                                 Column(modifier = Modifier.padding(10.dp)) {
                                     val decryptedBytes = transfer?.decryptedInMemoryBytes
+                                    val isUploading = transfer != null && (
+                                        transfer.state == TransferLifecycleState.ENCRYPTING_AND_CHUNKING ||
+                                            transfer.state == TransferLifecycleState.TRANSMITTING_OVER_TOR ||
+                                            transfer.state == TransferLifecycleState.VERIFYING_INTEGRITY
+                                        )
+                                    val uploadProgress = if (transfer != null && transfer.manifest.totalChunks > 0) {
+                                        (transfer.chunksProcessed.toFloat() / transfer.manifest.totalChunks.toFloat()).coerceIn(0f, 1f)
+                                    } else 0f
+                                    val uploadPercent = (uploadProgress * 100f).toInt().coerceIn(0, 100)
+
                                     val imageBitmap = if (message.payloadKind == MessagePayloadKind.IMAGE && decryptedBytes != null) {
-                                        remember(transfer.manifest.transferId, decryptedBytes.size) {
+                                        remember(message.id, decryptedBytes.size) {
                                             try {
                                                 BitmapFactory.decodeByteArray(decryptedBytes, 0, decryptedBytes.size)?.asImageBitmap()
                                             } catch (_: Throwable) {
@@ -917,48 +980,115 @@ fun MessageBubble(
                                     }
 
                                     if (imageBitmap != null) {
-                                        Image(
-                                            bitmap = imageBitmap,
-                                            contentDescription = transfer?.manifest?.sanitizedFileName ?: "Encrypted Image",
-                                            contentScale = ContentScale.Crop,
+                                        Box(
                                             modifier = Modifier
                                                 .fillMaxWidth()
                                                 .height(190.dp)
                                                 .clip(RoundedCornerShape(8.dp))
-                                                .clickable { onMediaPreviewClick?.invoke(message) }
-                                        )
+                                                .clickable(enabled = !isUploading) { onMediaPreviewClick?.invoke(message) },
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Image(
+                                                bitmap = imageBitmap,
+                                                contentDescription = transfer?.manifest?.sanitizedFileName ?: "Encrypted Image",
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.matchParentSize()
+                                            )
+                                            if (isUploading) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .matchParentSize()
+                                                        .background(Color.Black.copy(alpha = 0.35f)),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(60.dp)
+                                                            .clip(CircleShape)
+                                                            .background(Color.Black.copy(alpha = 0.65f)),
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        CircularProgressIndicator(
+                                                            progress = { uploadProgress.coerceAtLeast(0.06f) },
+                                                            color = Color.White,
+                                                            trackColor = Color.White.copy(alpha = 0.25f),
+                                                            strokeWidth = 3.dp,
+                                                            modifier = Modifier.size(50.dp)
+                                                        )
+                                                        Text(
+                                                            text = if (transfer?.state == TransferLifecycleState.ENCRYPTING_AND_CHUNKING) {
+                                                                "ENC"
+                                                            } else {
+                                                                "$uploadPercent%"
+                                                            },
+                                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                                fontSize = 11.sp,
+                                                                fontWeight = FontWeight.Bold
+                                                            ),
+                                                            color = Color.White
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
                                         Spacer(modifier = Modifier.height(8.dp))
                                     } else if (message.payloadKind == MessagePayloadKind.VIDEO && decryptedBytes != null) {
                                         Box(
                                             modifier = Modifier
                                                 .fillMaxWidth()
-                                                .height(110.dp)
+                                                .height(120.dp)
                                                 .clip(RoundedCornerShape(8.dp))
                                                 .background(Color(0xFF0F172A))
-                                                .clickable { onMediaPreviewClick?.invoke(message) },
+                                                .clickable(enabled = !isUploading) { onMediaPreviewClick?.invoke(message) },
                                             contentAlignment = Alignment.Center
                                         ) {
-                                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                            if (isUploading) {
                                                 Box(
                                                     modifier = Modifier
-                                                        .size(44.dp)
+                                                        .size(60.dp)
                                                         .clip(CircleShape)
-                                                        .background(emeraldTint),
+                                                        .background(Color.Black.copy(alpha = 0.65f)),
                                                     contentAlignment = Alignment.Center
                                                 ) {
-                                                    Icon(
-                                                        imageVector = Icons.Default.PlayArrow,
-                                                        contentDescription = "Play Video",
-                                                        tint = Color.White,
-                                                        modifier = Modifier.size(26.dp)
+                                                    CircularProgressIndicator(
+                                                        progress = { uploadProgress.coerceAtLeast(0.06f) },
+                                                        color = Color.White,
+                                                        trackColor = Color.White.copy(alpha = 0.25f),
+                                                        strokeWidth = 3.dp,
+                                                        modifier = Modifier.size(50.dp)
+                                                    )
+                                                    Text(
+                                                        text = "$uploadPercent%",
+                                                        style = MaterialTheme.typography.labelSmall.copy(
+                                                            fontSize = 11.sp,
+                                                            fontWeight = FontWeight.Bold
+                                                        ),
+                                                        color = Color.White
                                                     )
                                                 }
-                                                Spacer(modifier = Modifier.height(4.dp))
-                                                Text(
-                                                    text = "Tap to Play Encrypted Video",
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = Color.White
-                                                )
+                                            } else {
+                                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(44.dp)
+                                                            .clip(CircleShape)
+                                                            .background(emeraldTint),
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.PlayArrow,
+                                                            contentDescription = "Play Video",
+                                                            tint = Color.White,
+                                                            modifier = Modifier.size(26.dp)
+                                                        )
+                                                    }
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    Text(
+                                                        text = "Tap to Play Encrypted Video",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = Color.White
+                                                    )
+                                                }
                                             }
                                         }
                                         Spacer(modifier = Modifier.height(8.dp))
@@ -1055,16 +1185,23 @@ fun MessageBubble(
                                             TransferLifecycleState.ENCRYPTING_AND_CHUNKING,
                                             TransferLifecycleState.TRANSMITTING_OVER_TOR,
                                             TransferLifecycleState.VERIFYING_INTEGRITY -> {
-                                                val progress = if (transfer.manifest.totalChunks > 0) {
-                                                    transfer.chunksProcessed.toFloat() / transfer.manifest.totalChunks.toFloat()
-                                                } else 1f
+                                                val stateLabel = when (transfer.state) {
+                                                    TransferLifecycleState.ENCRYPTING_AND_CHUNKING -> "Encrypting media…"
+                                                    TransferLifecycleState.TRANSMITTING_OVER_TOR ->
+                                                        "Uploading $uploadPercent% (${transfer.chunksProcessed}/${transfer.manifest.totalChunks})"
+                                                    TransferLifecycleState.VERIFYING_INTEGRITY -> "Verifying integrity…"
+                                                    else -> transfer.state.name
+                                                }
                                                 LinearProgressIndicator(
-                                                    progress = { progress },
-                                                    modifier = Modifier.fillMaxWidth(),
+                                                    progress = { uploadProgress.coerceAtLeast(0.05f) },
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .clip(RoundedCornerShape(3.dp)),
                                                     color = emeraldTint
                                                 )
+                                                Spacer(modifier = Modifier.height(3.dp))
                                                 Text(
-                                                    text = "${transfer.state.name} (${transfer.chunksProcessed}/${transfer.manifest.totalChunks})",
+                                                    text = stateLabel,
                                                     style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp),
                                                     color = tealTint
                                                 )
@@ -1264,10 +1401,32 @@ fun MessageBubble(
                         )
                         if (message.isOutgoing) {
                             Spacer(modifier = Modifier.width(4.dp))
+                            val (tickIcon, tickTint, tickDesc) = when (message.deliveryState) {
+                                MessageDeliveryState.SENDING -> Triple(
+                                    Icons.Default.AccessTime,
+                                    MaterialTheme.colorScheme.onSurfaceVariant,
+                                    "Sending encrypted message"
+                                )
+                                MessageDeliveryState.SENT -> Triple(
+                                    Icons.Default.Done,
+                                    MaterialTheme.colorScheme.onSurfaceVariant,
+                                    "Sent to Tor P2P circuit"
+                                )
+                                MessageDeliveryState.DELIVERED -> Triple(
+                                    Icons.Default.DoneAll,
+                                    MaterialTheme.colorScheme.onSurfaceVariant,
+                                    "Delivered to peer device"
+                                )
+                                MessageDeliveryState.READ -> Triple(
+                                    Icons.Default.DoneAll,
+                                    WhatsAppReadTickBlue,
+                                    "Read by peer"
+                                )
+                            }
                             Icon(
-                                imageVector = Icons.Default.DoneAll,
-                                contentDescription = "Authenticated E2EE Delivered",
-                                tint = WhatsAppReadTickBlue,
+                                imageVector = tickIcon,
+                                contentDescription = tickDesc,
+                                tint = tickTint,
                                 modifier = Modifier.size(15.dp)
                             )
                         }

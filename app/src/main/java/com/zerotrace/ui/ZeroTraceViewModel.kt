@@ -11,9 +11,11 @@ import com.zerotrace.bridge.CallDirectionFilter
 import com.zerotrace.bridge.CallMediaKind
 import com.zerotrace.bridge.CallProtocolState
 import com.zerotrace.bridge.E2eeChatEnvelope
+import com.zerotrace.bridge.EncryptedFileManifest
 import com.zerotrace.bridge.EncryptedFileTransferEngine
 import com.zerotrace.bridge.EncryptedTransferProgress
 import com.zerotrace.bridge.EphemeralStatusItem
+import com.zerotrace.bridge.MessageDeliveryState
 import com.zerotrace.bridge.MessagePayloadKind
 import com.zerotrace.bridge.NativeRustBridge
 import com.zerotrace.bridge.ParsedQrInvite
@@ -147,6 +149,8 @@ data class ZeroTraceUiState(
     // Updates / Ephemeral P2P Status state
     val ephemeralStatuses: List<EphemeralStatusItem> = emptyList(),
     val activeViewingStatus: EphemeralStatusItem? = null,
+    val activeViewingStatuses: List<EphemeralStatusItem> = emptyList(),
+    val activeViewingStatusIndex: Int = 0,
     val statusPrivacyPolicy: StatusPrivacyPolicy = StatusPrivacyPolicy.ALL_VERIFIED_CONTACTS,
     // Calls state
     val activeCallState: ActiveCallUiState? = null,
@@ -297,15 +301,62 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                                 errorBannerMessage = null
                             )
                         }
+                        val snapshotState = _uiState.value
+                        val viewingNow = snapshotState.currentScreen == ZeroTraceScreen.CHAT &&
+                            snapshotState.activePeerContact?.onionAddress?.equals(canonicalOnion, ignoreCase = true) == true
+                        if (viewingNow && snapshotState.readReceiptsEnabled) {
+                            TorOnionTransportManager.sendReadReceipt(canonicalOnion)
+                        }
                     }
                     is PeerTransportEvent.DeliveryAck -> {
+                        val canonicalOnion = _uiState.value.verifiedContacts.firstOrNull {
+                            it.onionAddress.equals(event.peerOnion, ignoreCase = true)
+                        }?.onionAddress ?: event.peerOnion
                         val handle = _uiState.value.activeSessionHandle
-                        if (handle != null) {
-                            _uiState.update { state ->
-                                state.copy(
-                                    activeRatchetMetrics = RustCoreBridge.getSessionMetrics(handle) ?: state.activeRatchetMetrics
-                                )
+                        _uiState.update { state ->
+                            val updatedMap = state.richMessagesByOnion.toMutableMap()
+                            val existing = updatedMap[canonicalOnion]
+                            if (!existing.isNullOrEmpty()) {
+                                updatedMap[canonicalOnion] = existing.map { msg ->
+                                    if (msg.isOutgoing &&
+                                        msg.deliveryState != MessageDeliveryState.READ &&
+                                        (msg.wireSessionIdHex == null || msg.wireSessionIdHex == event.sessionIdHex) &&
+                                        (msg.pqEpoch < event.ratchetEpoch ||
+                                            (msg.pqEpoch == event.ratchetEpoch &&
+                                                (msg.wireMsgNum == null || msg.wireMsgNum <= event.msgNum)))
+                                    ) {
+                                        msg.copy(deliveryState = MessageDeliveryState.DELIVERED)
+                                    } else {
+                                        msg
+                                    }
+                                }
                             }
+                            state.copy(
+                                richMessagesByOnion = updatedMap,
+                                activeRatchetMetrics = handle?.let { RustCoreBridge.getSessionMetrics(it) } ?: state.activeRatchetMetrics
+                            )
+                        }
+                    }
+                    is PeerTransportEvent.ReadReceipt -> {
+                        val canonicalOnion = _uiState.value.verifiedContacts.firstOrNull {
+                            it.onionAddress.equals(event.peerOnion, ignoreCase = true)
+                        }?.onionAddress ?: event.peerOnion
+                        _uiState.update { state ->
+                            val updatedMap = state.richMessagesByOnion.toMutableMap()
+                            val existing = updatedMap[canonicalOnion]
+                            if (!existing.isNullOrEmpty()) {
+                                updatedMap[canonicalOnion] = existing.map { msg ->
+                                    if (msg.isOutgoing &&
+                                        msg.deliveryState != MessageDeliveryState.READ &&
+                                        msg.timestampEpochMillis <= event.readUpToEpochMillis + 2_500L
+                                    ) {
+                                        msg.copy(deliveryState = MessageDeliveryState.READ)
+                                    } else {
+                                        msg
+                                    }
+                                }
+                            }
+                            state.copy(richMessagesByOnion = updatedMap)
                         }
                     }
                     is PeerTransportEvent.IncomingCallInvite -> {
@@ -389,6 +440,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         )
         val updated = _uiState.value.verifiedContacts + autoContact
         saveEncryptedContactsToDisk(updated)
+        TorOnionTransportManager.registerVerifiedPeerOnions(updated.map { it.onionAddress })
         _uiState.update { it.copy(verifiedContacts = updated) }
         return autoContact
     }
@@ -422,6 +474,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     saveEncryptedContactsToDisk(contacts)
                 }
                 contacts.forEach { seedLoopbackPeerEphemeralStatusIfNeeded(it) }
+                TorOnionTransportManager.registerVerifiedPeerOnions(contacts.map { it.onionAddress })
                 _uiState.update {
                     it.copy(
                         currentScreen = ZeroTraceScreen.HOME,
@@ -436,8 +489,10 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 refreshMyPairingQr()
                 viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                     val torReady = TorOnionTransportManager.bootstrapTorAndStartOnionService()
-                    if (torReady && contacts.isNotEmpty()) {
-                        establishWarmSessionInBackground(contacts.first())
+                    val warmTarget = contacts.firstOrNull { !TorOnionTransportManager.isLoopbackVerificationContact(it) }
+                        ?: contacts.firstOrNull()
+                    if (torReady && warmTarget != null) {
+                        establishWarmSessionInBackground(warmTarget)
                     }
                 }
             } else {
@@ -557,7 +612,9 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     it.copy(
                         currentScreen = ZeroTraceScreen.HOME,
                         selectedBottomTab = MainBottomTab.UPDATES,
-                        activeViewingStatus = null
+                        activeViewingStatus = null,
+                        activeViewingStatuses = emptyList(),
+                        activeViewingStatusIndex = 0
                     )
                 }
                 true
@@ -665,6 +722,11 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun setReadReceiptsEnabled(enabled: Boolean) {
         _uiState.update { it.copy(readReceiptsEnabled = enabled) }
+        val activeState = _uiState.value
+        val activePeer = activeState.activePeerContact
+        if (enabled && activeState.currentScreen == ZeroTraceScreen.CHAT && activePeer != null) {
+            TorOnionTransportManager.sendReadReceipt(activePeer.onionAddress)
+        }
     }
 
     fun setTypingIndicatorsEnabled(enabled: Boolean) {
@@ -900,6 +962,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             .filterNot { it.onionAddress.equals(invite.onionAddress, ignoreCase = true) } + newRecord
 
         saveEncryptedContactsToDisk(updatedList)
+        TorOnionTransportManager.registerVerifiedPeerOnions(updatedList.map { it.onionAddress })
 
         // Seed an ephemeral P2P status card from the verified loopback peer if none exists yet
         seedLoopbackPeerEphemeralStatusIfNeeded(newRecord)
@@ -965,7 +1028,13 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             val metrics = RustCoreBridge.getSessionMetrics(existingHandle)
             if (metrics != null) {
                 viewModelScope.launch {
-                    syncVolatileMessagesToRichConversation(normalizedContact.onionAddress, volatileMsgs)
+                    syncVolatileMessagesToRichConversation(normalizedContact.onionAddress, volatileMsgs, metrics.sessionIdHex)
+                }
+                val hadUnread = (_uiState.value.unreadCountByOnion[normalizedContact.onionAddress] ?: 0) > 0
+                val hasIncoming = volatileMsgs.any { !it.isOutgoing } ||
+                    _uiState.value.richMessagesByOnion[normalizedContact.onionAddress].orEmpty().any { !it.isOutgoing }
+                if (_uiState.value.readReceiptsEnabled && (hadUnread || hasIncoming)) {
+                    TorOnionTransportManager.sendReadReceipt(normalizedContact.onionAddress)
                 }
                 _uiState.update { state ->
                     val clearedUnread = state.unreadCountByOnion.toMutableMap().apply {
@@ -1010,7 +1079,10 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 onSuccess = { handle ->
                     val volatileMsgs = RustCoreBridge.getVolatileMessages(handle)
                     val metrics = RustCoreBridge.getSessionMetrics(handle)
-                    syncVolatileMessagesToRichConversation(normalizedContact.onionAddress, volatileMsgs)
+                    syncVolatileMessagesToRichConversation(normalizedContact.onionAddress, volatileMsgs, metrics?.sessionIdHex)
+                    if (_uiState.value.readReceiptsEnabled && volatileMsgs.any { !it.isOutgoing }) {
+                        TorOnionTransportManager.sendReadReceipt(normalizedContact.onionAddress)
+                    }
 
                     _uiState.update { state ->
                         val clearedUnread = state.unreadCountByOnion.toMutableMap().apply {
@@ -1077,6 +1149,43 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             E2eeChatEnvelope.encodeText(msgId = msgId, body = trimmed)
         }
 
+        val nowMs = System.currentTimeMillis()
+        val isLoopback = TorOnionTransportManager.isLoopbackVerificationContact(contact)
+        val optimisticMsg = RichConversationMessage(
+            id = msgId,
+            senderLabel = "You",
+            bodyText = trimmed,
+            timestampEpochMillis = nowMs,
+            isOutgoing = true,
+            ratchetStepIndex = (_uiState.value.activeRatchetMetrics?.sendCount ?: 0L).toInt(),
+            pqEpoch = _uiState.value.activeRatchetMetrics?.ratchetEpoch ?: 1,
+            pqBraidAdvanced = forcePqBraidStep,
+            payloadKind = MessagePayloadKind.TEXT,
+            replyToMessageId = replyTarget?.id,
+            replyToPreview = replyTarget?.bodyText?.take(80),
+            replyToSenderLabel = replyTarget?.senderLabel,
+            deliveryState = MessageDeliveryState.SENDING
+        )
+
+        _uiState.update { state ->
+            val currentRich = state.richMessagesByOnion[contact.onionAddress].orEmpty()
+            val updatedMap = state.richMessagesByOnion.toMutableMap()
+            updatedMap[contact.onionAddress] = currentRich + optimisticMsg
+            val previews = state.lastMessagePreviewByOnion.toMutableMap().apply {
+                put(contact.onionAddress, trimmed)
+            }
+            val times = state.lastMessageTimeByOnion.toMutableMap().apply {
+                put(contact.onionAddress, nowMs)
+            }
+            state.copy(
+                replyingToMessage = null,
+                richMessagesByOnion = updatedMap,
+                lastMessagePreviewByOnion = previews,
+                lastMessageTimeByOnion = times,
+                errorBannerMessage = null
+            )
+        }
+
         viewModelScope.launch {
             var handle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress)
                 ?: _uiState.value.activeSessionHandle
@@ -1086,8 +1195,12 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 handle = connectRes.getOrNull()
                     ?: TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress)
                 if (handle == null) {
-                    _uiState.update {
-                        it.copy(
+                    _uiState.update { state ->
+                        val updatedMap = state.richMessagesByOnion.toMutableMap()
+                        updatedMap[contact.onionAddress] = updatedMap[contact.onionAddress].orEmpty()
+                            .filterNot { it.id == msgId }
+                        state.copy(
+                            richMessagesByOnion = updatedMap,
                             errorBannerMessage = connectRes.exceptionOrNull()?.message
                                 ?: "Peer device is not reachable yet on Tor .onion / P2P circuit."
                         )
@@ -1105,15 +1218,43 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             result.fold(
                 onSuccess = { updatedMessages ->
                     val effectiveHandle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress) ?: handle
+                    val metrics = RustCoreBridge.getSessionMetrics(effectiveHandle)
+                    val outgoingVm = updatedMessages.lastOrNull { it.isOutgoing }
+                    if (outgoingVm != null) {
+                        processedVolatileMsgKeys.add("${contact.onionAddress}:${outgoingVm.messageId}")
+                    }
                     syncVolatileMessagesToRichConversation(
                         onionAddress = contact.onionAddress,
-                        volatileMessages = updatedMessages
+                        volatileMessages = updatedMessages,
+                        sessionIdHex = metrics?.sessionIdHex
                     )
-                    _uiState.update {
-                        it.copy(
+                    _uiState.update { state ->
+                        val currentRich = state.richMessagesByOnion[contact.onionAddress].orEmpty()
+                        val updatedRich = currentRich.map { msg ->
+                            if (msg.id == msgId) {
+                                msg.copy(
+                                    ratchetStepIndex = (outgoingVm?.msgCounter ?: msg.ratchetStepIndex.toLong()).toInt(),
+                                    pqEpoch = outgoingVm?.ratchetEpoch ?: metrics?.ratchetEpoch ?: msg.pqEpoch,
+                                    pqBraidAdvanced = outgoingVm?.pqBraidStepTriggered ?: forcePqBraidStep,
+                                    deliveryState = if (msg.deliveryState == MessageDeliveryState.SENDING) {
+                                        if (isLoopback) MessageDeliveryState.DELIVERED else MessageDeliveryState.SENT
+                                    } else {
+                                        msg.deliveryState
+                                    },
+                                    wireSessionIdHex = metrics?.sessionIdHex ?: msg.wireSessionIdHex,
+                                    wireMsgNum = outgoingVm?.msgCounter ?: msg.wireMsgNum
+                                )
+                            } else {
+                                msg
+                            }
+                        }
+                        val updatedMap = state.richMessagesByOnion.toMutableMap()
+                        updatedMap[contact.onionAddress] = updatedRich
+                        state.copy(
                             activeSessionHandle = effectiveHandle,
                             activeChatMessages = updatedMessages,
-                            activeRatchetMetrics = RustCoreBridge.getSessionMetrics(effectiveHandle),
+                            activeRatchetMetrics = metrics,
+                            richMessagesByOnion = updatedMap,
                             replyingToMessage = null,
                             statusBannerMessage = null,
                             errorBannerMessage = null
@@ -1121,8 +1262,14 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                 },
                 onFailure = { err ->
-                    _uiState.update {
-                        it.copy(errorBannerMessage = "Send failed (Fail-Closed): ${err.message}")
+                    _uiState.update { state ->
+                        val updatedMap = state.richMessagesByOnion.toMutableMap()
+                        updatedMap[contact.onionAddress] = updatedMap[contact.onionAddress].orEmpty()
+                            .filterNot { it.id == msgId }
+                        state.copy(
+                            richMessagesByOnion = updatedMap,
+                            errorBannerMessage = "Send failed (Fail-Closed): ${err.message}"
+                        )
                     }
                 }
             )
@@ -1300,12 +1447,95 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         voiceDurationSec: Int? = null
     ) {
         val contact = _uiState.value.activePeerContact ?: return
-        val handle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress)
-            ?: _uiState.value.activeSessionHandle ?: return
         val replyTarget = _uiState.value.replyingToMessage
+        val isRealPeer = !TorOnionTransportManager.isLoopbackVerificationContact(contact)
+        val msgId = UUID.randomUUID().toString()
+        val provisionalTransferId = UUID.randomUUID().toString()
+        val safeProvisionalName = EncryptedFileTransferEngine.sanitizeFileName(fileName)
+        val totalChunksEst = ((samplePayloadBytes.size + EncryptedFileTransferEngine.CHUNK_SIZE_BYTES - 1) /
+            EncryptedFileTransferEngine.CHUNK_SIZE_BYTES).coerceAtLeast(1)
+        val nowMs = System.currentTimeMillis()
+        val provisionalManifest = EncryptedFileManifest(
+            transferId = provisionalTransferId,
+            sanitizedFileName = safeProvisionalName,
+            mimeType = mimeType,
+            totalSizeBytes = samplePayloadBytes.size,
+            totalChunks = totalChunksEst,
+            sha256DigestHex = ""
+        )
+        val optimisticMsg = RichConversationMessage(
+            id = msgId,
+            senderLabel = "You",
+            bodyText = caption,
+            timestampEpochMillis = nowMs,
+            isOutgoing = true,
+            ratchetStepIndex = (_uiState.value.activeRatchetMetrics?.sendCount ?: 0L).toInt(),
+            pqEpoch = _uiState.value.activeRatchetMetrics?.ratchetEpoch ?: 1,
+            pqBraidAdvanced = false,
+            payloadKind = kind,
+            replyToMessageId = replyTarget?.id,
+            replyToPreview = replyTarget?.bodyText?.take(80),
+            replyToSenderLabel = replyTarget?.senderLabel,
+            fileTransfer = EncryptedTransferProgress(
+                manifest = provisionalManifest,
+                direction = TransferDirection.OUTGOING,
+                state = TransferLifecycleState.ENCRYPTING_AND_CHUNKING,
+                chunksProcessed = 0,
+                bytesTransferred = 0L,
+                decryptedInMemoryBytes = samplePayloadBytes.copyOf()
+            ),
+            voiceDurationSeconds = voiceDurationSec,
+            deliveryState = MessageDeliveryState.SENDING
+        )
+
+        _uiState.update { state ->
+            val currentRich = state.richMessagesByOnion[contact.onionAddress].orEmpty()
+            val updatedMap = state.richMessagesByOnion.toMutableMap()
+            updatedMap[contact.onionAddress] = currentRich + optimisticMsg
+            val previews = state.lastMessagePreviewByOnion.toMutableMap().apply {
+                val icon = if (kind == MessagePayloadKind.VOICE_NOTE) "🎤" else "📎"
+                put(contact.onionAddress, "$icon $safeProvisionalName")
+            }
+            val times = state.lastMessageTimeByOnion.toMutableMap().apply {
+                put(contact.onionAddress, nowMs)
+            }
+            state.copy(
+                showAttachmentSheet = false,
+                replyingToMessage = null,
+                richMessagesByOnion = updatedMap,
+                lastMessagePreviewByOnion = previews,
+                lastMessageTimeByOnion = times,
+                errorBannerMessage = null
+            )
+        }
 
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             try {
+                var handle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress)
+                    ?: _uiState.value.activeSessionHandle
+                if (handle == null) {
+                    val connectRes = TorOnionTransportManager.establishAuthenticatedPeerSession(contact)
+                    handle = connectRes.getOrNull()
+                        ?: TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress)
+                    if (handle == null) {
+                        updateRichMessageTransferProgress(
+                            onionAddress = contact.onionAddress,
+                            msgId = msgId,
+                            state = TransferLifecycleState.INTEGRITY_FAILED,
+                            chunksProcessed = 0,
+                            bytesTransferred = 0L,
+                            failureReason = "Peer circuit not connected"
+                        )
+                        _uiState.update {
+                            it.copy(
+                                errorBannerMessage = connectRes.exceptionOrNull()?.message
+                                    ?: "Media transfer failed: Peer P2P circuit not connected."
+                            )
+                        }
+                        return@launch
+                    }
+                }
+
                 // 1. Encrypt & chunk payload with a dedicated 256-bit ChaCha20-Poly1305 file key
                 val bundle = EncryptedFileTransferEngine.encryptAndChunkPayload(
                     rawFileName = fileName,
@@ -1321,20 +1551,50 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     chunks = bundle.chunks
                 )
 
+                updateRichMessageTransferProgress(
+                    onionAddress = contact.onionAddress,
+                    msgId = msgId,
+                    state = TransferLifecycleState.TRANSMITTING_OVER_TOR,
+                    chunksProcessed = 0,
+                    bytesTransferred = 0L,
+                    manifestOverride = bundle.manifest,
+                    decryptedBytesOverride = reassembled
+                )
+
                 // 3. Transmit actual ChaCha20-Poly1305 encrypted chunks to peer device (if real peer)
-                val isRealPeer = !TorOnionTransportManager.isLoopbackVerificationContact(contact)
                 if (isRealPeer) {
+                    val totalChunks = bundle.chunks.size.coerceAtLeast(1)
+                    val emitStep = if (totalChunks <= 24) 1 else (totalChunks / 20).coerceAtLeast(1)
                     val chunksSent = TorOnionTransportManager.sendEncryptedMediaChunks(
                         peerOnion = contact.onionAddress,
                         transferId = bundle.manifest.transferId,
-                        chunks = bundle.chunks
+                        chunks = bundle.chunks,
+                        onChunkProgress = { sent, total ->
+                            if (sent == 1 || sent == total || sent % emitStep == 0) {
+                                val bytesDone = ((sent.toDouble() / total.coerceAtLeast(1)) * bundle.manifest.totalSizeBytes).toLong()
+                                updateRichMessageTransferProgress(
+                                    onionAddress = contact.onionAddress,
+                                    msgId = msgId,
+                                    state = TransferLifecycleState.TRANSMITTING_OVER_TOR,
+                                    chunksProcessed = sent,
+                                    bytesTransferred = bytesDone
+                                )
+                            }
+                        }
                     )
                     if (!chunksSent) {
                         bundle.wipeZeroize()
                         Arrays.fill(reassembled, 0.toByte())
+                        updateRichMessageTransferProgress(
+                            onionAddress = contact.onionAddress,
+                            msgId = msgId,
+                            state = TransferLifecycleState.INTEGRITY_FAILED,
+                            chunksProcessed = 0,
+                            bytesTransferred = 0L,
+                            failureReason = "Peer circuit disconnected during upload"
+                        )
                         _uiState.update {
                             it.copy(
-                                showAttachmentSheet = false,
                                 errorBannerMessage = "Media transfer failed: Peer P2P circuit not connected."
                             )
                         }
@@ -1342,16 +1602,14 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                 }
 
-                val transferProgress = EncryptedTransferProgress(
-                    manifest = bundle.manifest,
-                    direction = TransferDirection.OUTGOING,
-                    state = TransferLifecycleState.VERIFIED_READY_IN_RAM,
+                updateRichMessageTransferProgress(
+                    onionAddress = contact.onionAddress,
+                    msgId = msgId,
+                    state = TransferLifecycleState.VERIFYING_INTEGRITY,
                     chunksProcessed = bundle.manifest.totalChunks,
-                    bytesTransferred = bundle.manifest.totalSizeBytes.toLong(),
-                    decryptedInMemoryBytes = reassembled
+                    bytesTransferred = bundle.manifest.totalSizeBytes.toLong()
                 )
 
-                val msgId = UUID.randomUUID().toString()
                 val wireEnvelope = E2eeChatEnvelope.encodeMedia(
                     msgId = msgId,
                     payloadKind = kind,
@@ -1373,50 +1631,49 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
 
                 sendRes.fold(
                     onSuccess = { updatedVolatile ->
-                        // Mark outgoing volatile message ID so sync does not duplicate it
-                        updatedVolatile.lastOrNull { it.isOutgoing }?.let { vm ->
-                            processedVolatileMsgKeys.add("${contact.onionAddress}:${vm.messageId}")
+                        val outgoingVm = updatedVolatile.lastOrNull { it.isOutgoing }
+                        if (outgoingVm != null) {
+                            processedVolatileMsgKeys.add("${contact.onionAddress}:${outgoingVm.messageId}")
                         }
                         val effectiveHandle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress) ?: handle
                         val metrics = RustCoreBridge.getSessionMetrics(effectiveHandle)
-                        val richMsg = RichConversationMessage(
-                            id = msgId,
-                            senderLabel = "You",
-                            bodyText = caption,
-                            timestampEpochMillis = System.currentTimeMillis(),
-                            isOutgoing = true,
-                            ratchetStepIndex = (metrics?.sendCount ?: 1L).toInt(),
-                            pqEpoch = metrics?.ratchetEpoch ?: 1,
-                            pqBraidAdvanced = false,
-                            payloadKind = kind,
-                            replyToMessageId = replyTarget?.id,
-                            replyToPreview = replyTarget?.bodyText?.take(80),
-                            replyToSenderLabel = replyTarget?.senderLabel,
-                            fileTransfer = transferProgress,
-                            voiceDurationSeconds = voiceDurationSec
+                        val completedProgress = EncryptedTransferProgress(
+                            manifest = bundle.manifest,
+                            direction = TransferDirection.OUTGOING,
+                            state = TransferLifecycleState.VERIFIED_READY_IN_RAM,
+                            chunksProcessed = bundle.manifest.totalChunks,
+                            bytesTransferred = bundle.manifest.totalSizeBytes.toLong(),
+                            decryptedInMemoryBytes = reassembled
                         )
                         bundle.wipeZeroize()
 
                         _uiState.update { state ->
                             val currentRich = state.richMessagesByOnion[contact.onionAddress].orEmpty()
+                            val updatedRich = currentRich.map { msg ->
+                                if (msg.id == msgId) {
+                                    msg.copy(
+                                        ratchetStepIndex = (outgoingVm?.msgCounter ?: metrics?.sendCount ?: 1L).toInt(),
+                                        pqEpoch = outgoingVm?.ratchetEpoch ?: metrics?.ratchetEpoch ?: 1,
+                                        fileTransfer = completedProgress,
+                                        deliveryState = if (msg.deliveryState == MessageDeliveryState.SENDING) {
+                                            if (!isRealPeer) MessageDeliveryState.DELIVERED else MessageDeliveryState.SENT
+                                        } else {
+                                            msg.deliveryState
+                                        },
+                                        wireSessionIdHex = metrics?.sessionIdHex,
+                                        wireMsgNum = outgoingVm?.msgCounter
+                                    )
+                                } else {
+                                    msg
+                                }
+                            }
                             val updatedMap = state.richMessagesByOnion.toMutableMap()
-                            updatedMap[contact.onionAddress] = currentRich + richMsg
-                            val previews = state.lastMessagePreviewByOnion.toMutableMap().apply {
-                                val icon = if (kind == MessagePayloadKind.VOICE_NOTE) "🎤" else "📎"
-                                put(contact.onionAddress, "$icon ${bundle.manifest.sanitizedFileName}")
-                            }
-                            val times = state.lastMessageTimeByOnion.toMutableMap().apply {
-                                put(contact.onionAddress, richMsg.timestampEpochMillis)
-                            }
+                            updatedMap[contact.onionAddress] = updatedRich
                             state.copy(
-                                showAttachmentSheet = false,
-                                replyingToMessage = null,
                                 activeSessionHandle = effectiveHandle,
                                 activeChatMessages = updatedVolatile,
                                 activeRatchetMetrics = metrics,
                                 richMessagesByOnion = updatedMap,
-                                lastMessagePreviewByOnion = previews,
-                                lastMessageTimeByOnion = times,
                                 statusBannerMessage = null,
                                 errorBannerMessage = null
                             )
@@ -1425,18 +1682,32 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     onFailure = { err ->
                         bundle.wipeZeroize()
                         Arrays.fill(reassembled, 0.toByte())
+                        updateRichMessageTransferProgress(
+                            onionAddress = contact.onionAddress,
+                            msgId = msgId,
+                            state = TransferLifecycleState.INTEGRITY_FAILED,
+                            chunksProcessed = 0,
+                            bytesTransferred = 0L,
+                            failureReason = err.message ?: "Aborted"
+                        )
                         _uiState.update {
                             it.copy(
-                                showAttachmentSheet = false,
                                 errorBannerMessage = "Attachment transfer aborted (Fail-Closed): ${err.message}"
                             )
                         }
                     }
                 )
             } catch (e: Exception) {
+                updateRichMessageTransferProgress(
+                    onionAddress = contact.onionAddress,
+                    msgId = msgId,
+                    state = TransferLifecycleState.INTEGRITY_FAILED,
+                    chunksProcessed = 0,
+                    bytesTransferred = 0L,
+                    failureReason = e.message ?: "Rejected"
+                )
                 _uiState.update {
                     it.copy(
-                        showAttachmentSheet = false,
                         errorBannerMessage = "Encrypted file engine rejected attachment: ${e.message}"
                     )
                 }
@@ -1444,10 +1715,53 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    private fun updateRichMessageTransferProgress(
+        onionAddress: String,
+        msgId: String,
+        state: TransferLifecycleState,
+        chunksProcessed: Int,
+        bytesTransferred: Long,
+        manifestOverride: EncryptedFileManifest? = null,
+        decryptedBytesOverride: ByteArray? = null,
+        failureReason: String? = null
+    ) {
+        _uiState.update { ui ->
+            val list = ui.richMessagesByOnion[onionAddress] ?: return@update ui
+            val updated = list.map { msg ->
+                if (msg.id == msgId && msg.fileTransfer != null) {
+                    val prev = msg.fileTransfer
+                    if (decryptedBytesOverride != null && prev.decryptedInMemoryBytes != null &&
+                        prev.decryptedInMemoryBytes !== decryptedBytesOverride
+                    ) {
+                        Arrays.fill(prev.decryptedInMemoryBytes, 0.toByte())
+                    }
+                    msg.copy(
+                        fileTransfer = prev.copy(
+                            manifest = manifestOverride ?: prev.manifest,
+                            state = state,
+                            chunksProcessed = chunksProcessed,
+                            bytesTransferred = bytesTransferred,
+                            decryptedInMemoryBytes = decryptedBytesOverride ?: prev.decryptedInMemoryBytes,
+                            failureReason = failureReason
+                        )
+                    )
+                } else {
+                    msg
+                }
+            }
+            val map = ui.richMessagesByOnion.toMutableMap()
+            map[onionAddress] = updated
+            ui.copy(richMessagesByOnion = map)
+        }
+    }
+
     private suspend fun syncVolatileMessagesToRichConversation(
         onionAddress: String,
-        volatileMessages: List<VolatileChatMessage>
+        volatileMessages: List<VolatileChatMessage>,
+        sessionIdHex: String? = null
     ) {
+        val resolvedSessionId = sessionIdHex ?: TorOnionTransportManager.getActiveRealPeerSessionHandle(onionAddress)
+            ?.let { RustCoreBridge.getSessionMetrics(it)?.sessionIdHex }
         val currentRich = _uiState.value.richMessagesByOnion[onionAddress].orEmpty().toMutableList()
         val peerAlias = _uiState.value.verifiedContacts.firstOrNull {
             it.onionAddress.equals(onionAddress, ignoreCase = true)
@@ -1484,7 +1798,10 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                             payloadKind = MessagePayloadKind.TEXT,
                             replyToMessageId = decoded.replyToId,
                             replyToPreview = decoded.replyToPreview,
-                            replyToSenderLabel = decoded.replyToSender
+                            replyToSenderLabel = decoded.replyToSender,
+                            deliveryState = if (vm.isOutgoing) MessageDeliveryState.SENT else MessageDeliveryState.READ,
+                            wireSessionIdHex = resolvedSessionId,
+                            wireMsgNum = vm.msgCounter
                         )
                     )
                     changed = true
@@ -1549,7 +1866,10 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                             replyToPreview = decoded.replyToPreview,
                             replyToSenderLabel = decoded.replyToSender,
                             fileTransfer = progress,
-                            voiceDurationSeconds = decoded.voiceDurationSec
+                            voiceDurationSeconds = decoded.voiceDurationSec,
+                            deliveryState = if (vm.isOutgoing) MessageDeliveryState.SENT else MessageDeliveryState.READ,
+                            wireSessionIdHex = resolvedSessionId,
+                            wireMsgNum = vm.msgCounter
                         )
                     )
                     changed = true
@@ -1860,13 +2180,192 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun openStatusViewer(status: EphemeralStatusItem) {
         _uiState.update { state ->
+            val now = System.currentTimeMillis()
+            val group = state.ephemeralStatuses
+                .filter {
+                    !it.isExpired(now) && (
+                        if (status.isOwnStatus) it.isOwnStatus
+                        else (!it.isOwnStatus && it.authorOnion.equals(status.authorOnion, ignoreCase = true))
+                    )
+                }
+                .sortedBy { it.createdAtEpochMillis }
+                .ifEmpty { listOf(status) }
+
+            val initialIdx = group.indexOfFirst { it.statusId == status.statusId }.takeIf { it >= 0 }
+                ?: group.indexOfFirst { !it.viewedByLocalUser }.takeIf { it >= 0 }
+                ?: 0
+
+            val active = group[initialIdx].copy(viewedByLocalUser = true)
+            val updatedGroup = group.mapIndexed { idx, item ->
+                if (idx == initialIdx) active else item
+            }
             val updatedList = state.ephemeralStatuses.map {
-                if (it.statusId == status.statusId) it.copy(viewedByLocalUser = true) else it
+                if (it.statusId == active.statusId) it.copy(viewedByLocalUser = true) else it
             }
             state.copy(
                 ephemeralStatuses = updatedList,
-                activeViewingStatus = status.copy(viewedByLocalUser = true),
+                activeViewingStatus = active,
+                activeViewingStatuses = updatedGroup,
+                activeViewingStatusIndex = initialIdx,
                 currentScreen = ZeroTraceScreen.STATUS_VIEWER
+            )
+        }
+    }
+
+    fun stepViewingStatus(delta: Int) {
+        val state = _uiState.value
+        val group = state.activeViewingStatuses
+        if (group.isEmpty()) {
+            navigateBack()
+            return
+        }
+        val nextIdx = state.activeViewingStatusIndex + delta
+        if (nextIdx >= group.size) {
+            navigateBack()
+            return
+        }
+        val clampedIdx = nextIdx.coerceAtLeast(0)
+        val nextItem = group[clampedIdx].copy(viewedByLocalUser = true)
+        _uiState.update { cur ->
+            val updatedGroup = cur.activeViewingStatuses.mapIndexed { idx, item ->
+                if (idx == clampedIdx) nextItem else item
+            }
+            val updatedAll = cur.ephemeralStatuses.map {
+                if (it.statusId == nextItem.statusId) it.copy(viewedByLocalUser = true) else it
+            }
+            cur.copy(
+                ephemeralStatuses = updatedAll,
+                activeViewingStatus = nextItem,
+                activeViewingStatuses = updatedGroup,
+                activeViewingStatusIndex = clampedIdx
+            )
+        }
+    }
+
+    fun sendStatusReplyToPeer(statusItem: EphemeralStatusItem, replyText: String) {
+        val trimmed = replyText.trim()
+        if (trimmed.isEmpty()) return
+        val contact = _uiState.value.verifiedContacts.firstOrNull {
+            it.onionAddress.equals(statusItem.authorOnion, ignoreCase = true)
+        } ?: return
+
+        val msgId = UUID.randomUUID().toString()
+        val previewLabel = statusItem.captionText.ifBlank {
+            when (statusItem.mediaType) {
+                StatusMediaType.IMAGE_CARD -> "Photo Status"
+                StatusMediaType.VIDEO_CARD -> "Video Status"
+                StatusMediaType.TEXT_CARD -> "Status"
+            }
+        }.take(40)
+        val formattedText = "Status reply: $trimmed"
+        val wirePlaintext = E2eeChatEnvelope.encodeText(
+            msgId = msgId,
+            body = formattedText,
+            replyToId = statusItem.statusId,
+            replyToPreview = previewLabel,
+            replyToSender = "${statusItem.authorAlias} • Status"
+        )
+        val nowMs = System.currentTimeMillis()
+        val isLoopback = TorOnionTransportManager.isLoopbackVerificationContact(contact)
+        val optimisticMsg = RichConversationMessage(
+            id = msgId,
+            senderLabel = "You",
+            bodyText = formattedText,
+            timestampEpochMillis = nowMs,
+            isOutgoing = true,
+            ratchetStepIndex = 1,
+            pqEpoch = 1,
+            pqBraidAdvanced = false,
+            payloadKind = MessagePayloadKind.TEXT,
+            replyToMessageId = statusItem.statusId,
+            replyToPreview = previewLabel,
+            replyToSenderLabel = "${statusItem.authorAlias} • Status",
+            deliveryState = MessageDeliveryState.SENDING
+        )
+
+        _uiState.update { state ->
+            val currentRich = state.richMessagesByOnion[contact.onionAddress].orEmpty()
+            val updatedMap = state.richMessagesByOnion.toMutableMap()
+            updatedMap[contact.onionAddress] = currentRich + optimisticMsg
+            val previews = state.lastMessagePreviewByOnion.toMutableMap().apply {
+                put(contact.onionAddress, formattedText)
+            }
+            val times = state.lastMessageTimeByOnion.toMutableMap().apply {
+                put(contact.onionAddress, nowMs)
+            }
+            state.copy(
+                richMessagesByOnion = updatedMap,
+                lastMessagePreviewByOnion = previews,
+                lastMessageTimeByOnion = times,
+                statusBannerMessage = isHi(
+                    "${statusItem.authorAlias} को एन्क्रिप्टेड स्टेटस रिप्लाई भेजा जा रहा है…",
+                    "Sending encrypted reply to ${statusItem.authorAlias}…"
+                )
+            )
+        }
+
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            var handle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress)
+                ?: _uiState.value.activeSessionHandle?.takeIf {
+                    _uiState.value.activePeerContact?.onionAddress.equals(contact.onionAddress, ignoreCase = true)
+                }
+            if (handle == null) {
+                val res = TorOnionTransportManager.establishAuthenticatedPeerSession(contact)
+                handle = res.getOrNull() ?: TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress)
+            }
+            if (handle == null) {
+                _uiState.update {
+                    it.copy(errorBannerMessage = "Could not send status reply: Peer P2P circuit offline.")
+                }
+                return@launch
+            }
+            val sendRes = TorOnionTransportManager.sendEncryptedMessageOverCircuit(
+                sessionHandle = handle,
+                plaintext = wirePlaintext,
+                contact = contact
+            )
+            sendRes.fold(
+                onSuccess = { updatedVolatile ->
+                    val outgoingVm = updatedVolatile.lastOrNull { it.isOutgoing }
+                    if (outgoingVm != null) {
+                        processedVolatileMsgKeys.add("${contact.onionAddress}:${outgoingVm.messageId}")
+                    }
+                    val effectiveHandle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress) ?: handle
+                    val metrics = RustCoreBridge.getSessionMetrics(effectiveHandle)
+                    syncVolatileMessagesToRichConversation(contact.onionAddress, updatedVolatile, metrics?.sessionIdHex)
+                    _uiState.update { state ->
+                        val updatedMap = state.richMessagesByOnion.toMutableMap()
+                        val list = updatedMap[contact.onionAddress].orEmpty().map { m ->
+                            if (m.id == msgId) {
+                                m.copy(
+                                    ratchetStepIndex = (outgoingVm?.msgCounter ?: metrics?.sendCount ?: 1L).toInt(),
+                                    pqEpoch = outgoingVm?.ratchetEpoch ?: metrics?.ratchetEpoch ?: 1,
+                                    deliveryState = if (m.deliveryState == MessageDeliveryState.SENDING) {
+                                        if (isLoopback) MessageDeliveryState.DELIVERED else MessageDeliveryState.SENT
+                                    } else {
+                                        m.deliveryState
+                                    },
+                                    wireSessionIdHex = metrics?.sessionIdHex,
+                                    wireMsgNum = outgoingVm?.msgCounter
+                                )
+                            } else m
+                        }
+                        updatedMap[contact.onionAddress] = list
+                        state.copy(
+                            richMessagesByOnion = updatedMap,
+                            statusBannerMessage = isHi(
+                                "${statusItem.authorAlias} को एन्क्रिप्टेड स्टेटस रिप्लाई भेजा गया",
+                                "Encrypted reply sent to ${statusItem.authorAlias}"
+                            ),
+                            errorBannerMessage = null
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(errorBannerMessage = "Status reply failed: ${err.message}")
+                    }
+                }
             )
         }
     }
@@ -1875,10 +2374,17 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         _uiState.update { state ->
             state.ephemeralStatuses.find { it.statusId == statusId }?.wipeFromRam()
             val remaining = state.ephemeralStatuses.filterNot { it.statusId == statusId }
+            val remainingGroup = state.activeViewingStatuses.filterNot { it.statusId == statusId }
+            val deletedViewing = state.activeViewingStatus?.statusId == statusId
+            val nextIdx = state.activeViewingStatusIndex.coerceAtMost((remainingGroup.size - 1).coerceAtLeast(0))
             state.copy(
                 ephemeralStatuses = remaining,
-                activeViewingStatus = if (state.activeViewingStatus?.statusId == statusId) null else state.activeViewingStatus,
-                currentScreen = if (state.currentScreen == ZeroTraceScreen.STATUS_VIEWER) ZeroTraceScreen.HOME else state.currentScreen,
+                activeViewingStatuses = if (deletedViewing) remainingGroup else state.activeViewingStatuses,
+                activeViewingStatusIndex = if (deletedViewing) nextIdx else state.activeViewingStatusIndex,
+                activeViewingStatus = if (deletedViewing) remainingGroup.getOrNull(nextIdx) else state.activeViewingStatus,
+                currentScreen = if (state.currentScreen == ZeroTraceScreen.STATUS_VIEWER && (deletedViewing && remainingGroup.isEmpty())) {
+                    ZeroTraceScreen.HOME
+                } else state.currentScreen,
                 statusBannerMessage = "Ephemeral status payload zeroized from RAM."
             )
         }
@@ -1977,6 +2483,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     isVideoCall = (mediaKind == CallMediaKind.VIDEO),
                     remoteHost = null,
                     remoteMediaPort = null,
+                    allowSelfLoopback = true,
                     onFallbackFrameSend = { frame ->
                         EncryptedCallMediaEngine.processIncomingEncryptedMediaFrame(frame)
                     }
@@ -2333,6 +2840,8 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 unreadCountByOnion = emptyMap(),
                 ephemeralStatuses = emptyList(),
                 activeViewingStatus = null,
+                activeViewingStatuses = emptyList(),
+                activeViewingStatusIndex = 0,
                 activeCallState = null,
                 callHistory = emptyList(),
                 activeRatchetMetrics = null,
@@ -2359,6 +2868,9 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 lastMessagePreviewByOnion = emptyMap(),
                 unreadCountByOnion = emptyMap(),
                 ephemeralStatuses = emptyList(),
+                activeViewingStatus = null,
+                activeViewingStatuses = emptyList(),
+                activeViewingStatusIndex = 0,
                 callHistory = emptyList(),
                 statusBannerMessage = "All volatile chat buffers, decrypted attachments, statuses & call logs wiped from RAM."
             )
@@ -2372,12 +2884,13 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
     fun retryTorBootstrap() {
         _uiState.update { it.copy(errorBannerMessage = null, statusBannerMessage = null) }
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val contacts = _uiState.value.verifiedContacts
+            TorOnionTransportManager.registerVerifiedPeerOnions(contacts.map { it.onionAddress })
             val ok = TorOnionTransportManager.bootstrapTorAndStartOnionService()
-            if (ok) {
-                val firstContact = _uiState.value.verifiedContacts.firstOrNull()
-                if (firstContact != null) {
-                    establishWarmSessionInBackground(firstContact)
-                }
+            val warmTarget = contacts.firstOrNull { !TorOnionTransportManager.isLoopbackVerificationContact(it) }
+                ?: contacts.firstOrNull()
+            if (ok && warmTarget != null) {
+                establishWarmSessionInBackground(warmTarget)
             }
         }
     }
@@ -2386,12 +2899,13 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         TorOnionTransportManager.configureTransportBackend(backend, customSocksPort)
         _uiState.update { it.copy(socksPort = customSocksPort, errorBannerMessage = null) }
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val contacts = _uiState.value.verifiedContacts
+            TorOnionTransportManager.registerVerifiedPeerOnions(contacts.map { it.onionAddress })
             val ok = TorOnionTransportManager.bootstrapTorAndStartOnionService()
-            if (ok) {
-                val firstContact = _uiState.value.verifiedContacts.firstOrNull()
-                if (firstContact != null) {
-                    establishWarmSessionInBackground(firstContact)
-                }
+            val warmTarget = contacts.firstOrNull { !TorOnionTransportManager.isLoopbackVerificationContact(it) }
+                ?: contacts.firstOrNull()
+            if (ok && warmTarget != null) {
+                establishWarmSessionInBackground(warmTarget)
             }
         }
     }

@@ -104,6 +104,12 @@ object EmbeddedTorEngine {
         val conn = controlConn
             ?: throw IOException("Embedded Tor control socket did not start within 25s")
 
+        applyFastTorRuntimeConf(conn)
+        try {
+            conn.signal("ACTIVE")
+        } catch (_: Throwable) {
+        }
+
         onProgress(20, "Bootstrapping Tor directory consensus…")
 
         // 2. Monitor real Tor bootstrap progress (0% -> 100%, up to 95s on cellular/slow networks)
@@ -204,12 +210,127 @@ object EmbeddedTorEngine {
 
         activePublishedOnionStem = rawStem
         activePublishedLocalPort = localListenPort
+        try {
+            conn.signal("ACTIVE")
+        } catch (_: Throwable) {
+        }
         onProgress(100, "Tor v3 Onion Service live (SOCKS5 :$resolvedSocksPort)")
 
         EmbeddedTorReadyResult(
             socksPort = resolvedSocksPort,
             publishedOnionAddress = fullOnion
         )
+    }
+
+    private fun applyFastTorRuntimeConf(conn: TorControlConnection) {
+        // Tune Tor 0.4.8 for faster mobile cross-network & cellular/5G CGNAT rendezvous:
+        // - Prefer IPv4 ORPorts (avoids 30s+ IPv6 CGNAT connect stalls on mobile data)
+        // - Disable dormancy & keep circuits warm for rapid .onion dial and HS descriptor publish
+        val fastSettings = listOf(
+            "ClientUseIPv4 1",
+            "ClientPreferIPv6ORPort 0",
+            "LearnCircuitBuildTimeout 0",
+            "CircuitBuildTimeout 18",
+            "NumEntryGuards 2",
+            "DormantOnFirstStartup 0",
+            "DormantCanceledByStartup 1",
+            "KeepalivePeriod 30",
+            "SocksTimeout 45"
+        )
+        try {
+            conn.setConf(fastSettings)
+        } catch (_: Throwable) {
+            for (entry in fastSettings) {
+                val spaceIdx = entry.indexOf(' ')
+                if (spaceIdx > 0) {
+                    val k = entry.substring(0, spaceIdx)
+                    val v = entry.substring(spaceIdx + 1)
+                    try {
+                        conn.setConf(k, v)
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Triggers rapid Tor circuit & hidden-service recovery after Android switches networks
+     * (e.g. Wi-Fi A -> Wi-Fi B or Wi-Fi -> 4G/5G Mobile Data) without tearing down identity.
+     */
+    suspend fun onNetworkChanged(
+        virtualOnionPort: Int,
+        localListenPort: Int,
+        torAddOnionPrivateKeyParam: String?,
+        expectedOnionAddress: String?
+    ): Boolean = withContext(Dispatchers.IO) {
+        val service = boundService ?: return@withContext false
+        val conn = service.torControlConnection ?: return@withContext false
+        try {
+            try {
+                conn.setConf("DisableNetwork", "1")
+                delay(120L)
+                conn.setConf("DisableNetwork", "0")
+            } catch (_: Throwable) {
+            }
+            applyFastTorRuntimeConf(conn)
+            try {
+                conn.dropTimeouts()
+            } catch (_: Throwable) {
+            }
+            try {
+                conn.signal("ACTIVE")
+            } catch (_: Throwable) {
+            }
+
+            val resolvedPort = querySocksPort(conn, service)
+            if (resolvedPort in 1..65535) {
+                activeSocksPort = resolvedPort
+            }
+
+            // Re-verify our v3 .onion descriptor is still registered on Tor
+            val expectedStem = expectedOnionAddress?.trim()?.lowercase()?.removeSuffix(".onion")
+            val currentOnionsRaw = try {
+                conn.getInfo("onions/current")
+            } catch (_: Throwable) {
+                null
+            }
+            val currentStem = activePublishedOnionStem
+            val isMissing = currentStem.isNullOrBlank() ||
+                (expectedStem != null && currentOnionsRaw != null && !currentOnionsRaw.contains(expectedStem, ignoreCase = true))
+
+            if (isMissing && localListenPort in 1..65535) {
+                val keySpec = torAddOnionPrivateKeyParam ?: "NEW:ED25519-V3"
+                val ports = mapOf(virtualOnionPort to "127.0.0.1:$localListenPort")
+                val addRes = conn.addOnion(keySpec, ports, true, false)
+                val newStem = addRes[TorControlCommands.HS_ADDRESS]?.trim()?.lowercase()?.removeSuffix(".onion")
+                if (!newStem.isNullOrBlank()) {
+                    activePublishedOnionStem = newStem
+                    activePublishedLocalPort = localListenPort
+                }
+            }
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Proactively asks the embedded Tor daemon to fetch a peer's v3 `.onion` descriptor
+     * so subsequent SOCKS5 rendezvous circuits establish faster.
+     */
+    fun prefetchOnionDescriptor(peerOnion: String) {
+        val conn = try {
+            boundService?.torControlConnection
+        } catch (_: Throwable) {
+            null
+        } ?: return
+        val stem = peerOnion.trim().lowercase().removeSuffix(".onion")
+        if (stem.length != 56) return
+        try {
+            conn.hsFetch(stem)
+        } catch (_: Throwable) {
+        }
     }
 
     private fun querySocksPort(conn: TorControlConnection, service: TorService): Int {
@@ -255,6 +376,10 @@ object EmbeddedTorEngine {
 
         serviceConnection = conn
         val intent = Intent(appCtx, TorService::class.java)
+        try {
+            appCtx.startService(intent)
+        } catch (_: Throwable) {
+        }
         val bindAccepted = appCtx.bindService(intent, conn, Context.BIND_AUTO_CREATE)
         if (!bindAccepted) {
             serviceConnection = null
