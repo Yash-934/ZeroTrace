@@ -16,11 +16,16 @@ import com.example.MainActivity
 import com.example.R
 import com.zerotrace.bridge.CallMediaKind
 import com.zerotrace.bridge.EncryptedFileChunk
+import com.zerotrace.bridge.EncryptedFileManifest
+import com.zerotrace.bridge.EncryptedFileTransferEngine
+import com.zerotrace.bridge.EphemeralStatusItem
 import com.zerotrace.bridge.HandshakeInitWire
 import com.zerotrace.bridge.HandshakeResponseWire
 import com.zerotrace.bridge.PublicIdentitySummary
 import com.zerotrace.bridge.RatchetWirePacket
 import com.zerotrace.bridge.RustCoreBridge
+import com.zerotrace.bridge.StatusMediaType
+import com.zerotrace.bridge.StatusPrivacyPolicy
 import com.zerotrace.bridge.VerifiedContactRecord
 import com.zerotrace.bridge.VolatileChatMessage
 import com.zerotrace.bridge.toHex
@@ -192,6 +197,11 @@ sealed interface PeerTransportEvent {
         val callId: String,
         val frameBytes: ByteArray
     ) : PeerTransportEvent
+
+    data class IncomingStatusItem(
+        val peerOnion: String,
+        val statusItem: EphemeralStatusItem
+    ) : PeerTransportEvent
 }
 
 /**
@@ -362,6 +372,7 @@ object TorOnionTransportManager {
     private const val FRAME_CALL_REJECT: Byte = 0x22
     private const val FRAME_CALL_END: Byte = 0x23
     private const val FRAME_CALL_MEDIA_FALLBACK: Byte = 0x24
+    private const val FRAME_STATUS_ITEM: Byte = 0x25
 
     private const val DEFAULT_P2P_TCP_PORT = 9443
     private const val DEFAULT_P2P_UDP_PORT = 19443
@@ -413,7 +424,7 @@ object TorOnionTransportManager {
     private val _connectedPeerOnions = MutableStateFlow<Set<String>>(emptySet())
     val connectedPeerOnions: StateFlow<Set<String>> = _connectedPeerOnions.asStateFlow()
 
-    private val _peerTransportEvents = MutableSharedFlow<PeerTransportEvent>(extraBufferCapacity = 64)
+    private val _peerTransportEvents = MutableSharedFlow<PeerTransportEvent>(extraBufferCapacity = 256)
     val peerTransportEvents: SharedFlow<PeerTransportEvent> = _peerTransportEvents.asSharedFlow()
 
     private var localOnionServerSocket: ServerSocket? = null
@@ -1213,6 +1224,23 @@ object TorOnionTransportManager {
             }
         }
 
+        fun sendStatusItemFrame(
+            statusId: String,
+            metaNonce12: ByteArray,
+            metaCiphertext: ByteArray,
+            ed25519Sig: ByteArray
+        ) {
+            synchronized(writeLock) {
+                out.writeInt(WIRE_MAGIC)
+                out.writeByte(FRAME_STATUS_ITEM.toInt())
+                out.writeUTF(statusId)
+                writeBytes(out, metaNonce12)
+                writeBytes(out, metaCiphertext)
+                writeBytes(out, ed25519Sig)
+                out.flush()
+            }
+        }
+
         fun closeQuietly() {
             try {
                 socket.close()
@@ -1401,10 +1429,26 @@ object TorOnionTransportManager {
                         _peerTransportEvents.tryEmit(PeerTransportEvent.CallEnded(peerOnion, callId))
                     }
                     FRAME_CALL_MEDIA_FALLBACK -> {
-                        val callId = inp.readUTF()
+                        inp.readUTF()
                         val frameBytes = readBytes(inp)
                         EncryptedCallMediaEngine.processIncomingEncryptedMediaFrame(frameBytes)
-                        _peerTransportEvents.tryEmit(PeerTransportEvent.IncomingCallMediaFrame(peerOnion, callId, frameBytes))
+                    }
+                    FRAME_STATUS_ITEM -> {
+                        val statusId = inp.readUTF()
+                        val metaNonce12 = readBytes(inp)
+                        val metaCt = readBytes(inp)
+                        val sig = readBytes(inp)
+                        val transcript = "ZT2-STATUS-V1|$statusId|$peerOnion|${metaNonce12.toHex()}|${metaCt.toHex()}"
+                            .toByteArray(Charsets.UTF_8)
+                        val verified = RustCoreBridge.verifyEd25519(channel.peerHello.ed25519PublicKey, transcript, sig)
+                        if (verified) {
+                            scope.launch {
+                                try {
+                                    handleIncomingStatusItem(channel, peerOnion, statusId, metaNonce12, metaCt)
+                                } catch (_: Throwable) {
+                                }
+                            }
+                        }
                     }
                     else -> break
                 }
@@ -2044,6 +2088,191 @@ object TorOnionTransportManager {
         try {
             livePeerChannels[peerOnion.lowercase()]?.takeIf { it.isAlive() }?.sendCallMediaFallbackFrame(callId, frameBytes)
         } catch (_: Throwable) {
+        }
+    }
+
+    suspend fun broadcastStatusItem(
+        item: EphemeralStatusItem,
+        targetPeerOnions: Set<String>? = null
+    ): Int = withContext(Dispatchers.IO) {
+        if (item.isExpired()) return@withContext 0
+        val peers = livePeerChannels.entries
+            .filter { (onion, ch) ->
+                ch.isAlive() && (targetPeerOnions == null || targetPeerOnions.any { it.equals(onion, ignoreCase = true) })
+            }
+            .map { it.key }
+        var delivered = 0
+        for (peerOnion in peers) {
+            if (sendStatusItemToPeer(peerOnion, item)) {
+                delivered++
+            }
+        }
+        delivered
+    }
+
+    suspend fun sendStatusItemToPeer(
+        peerOnion: String,
+        item: EphemeralStatusItem
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (item.isExpired()) return@withContext false
+        val channel = livePeerChannels[peerOnion.lowercase()]?.takeIf { it.isAlive() } ?: return@withContext false
+        val localOnion = RustCoreBridge.getPublicIdentitySummary()?.onionAddress?.lowercase() ?: return@withContext false
+        val statusKey32 = RustCoreBridge.deriveStaticPeerStatusKey32(channel.peerHello.x25519PublicKey, item.statusId)
+            ?: return@withContext false
+
+        return@withContext try {
+            val payloadBytes = item.encryptedPayloadBytes?.takeIf { it.isNotEmpty() }
+            val chunkBundle = if (payloadBytes != null) {
+                EncryptedFileTransferEngine.encryptAndChunkPayload(
+                    rawFileName = item.sanitizedFileName ?: when (item.mediaType) {
+                        StatusMediaType.VIDEO_CARD -> "status_video.mp4"
+                        else -> "status_photo.jpg"
+                    },
+                    mimeType = item.mimeType ?: when (item.mediaType) {
+                        StatusMediaType.VIDEO_CARD -> "video/mp4"
+                        else -> "image/jpeg"
+                    },
+                    payloadBytes = payloadBytes,
+                    stripImageMetadata = (item.mediaType == StatusMediaType.IMAGE_CARD)
+                )
+            } else null
+
+            if (chunkBundle != null) {
+                for (chunk in chunkBundle.chunks) {
+                    channel.sendMediaChunk(chunkBundle.manifest.transferId, chunk)
+                }
+            }
+
+            val metaBytes = ByteArrayOutputStream().use { baos ->
+                DataOutputStream(baos).use { out ->
+                    out.writeUTF(item.statusId)
+                    out.writeUTF(item.authorAlias)
+                    out.writeUTF(item.mediaType.name)
+                    out.writeUTF(item.captionText)
+                    out.writeUTF(item.backgroundHex)
+                    out.writeLong(item.createdAtEpochMillis)
+                    out.writeLong(item.expiresAtEpochMillis)
+                    out.writeUTF(item.mimeType ?: "")
+                    out.writeUTF(item.sanitizedFileName ?: "")
+                    if (chunkBundle != null) {
+                        out.writeUTF(chunkBundle.manifest.transferId)
+                        out.writeInt(chunkBundle.manifest.totalSizeBytes)
+                        out.writeInt(chunkBundle.manifest.totalChunks)
+                        out.writeUTF(chunkBundle.manifest.sha256DigestHex)
+                        writeBytes(out, chunkBundle.fileSecretKey32)
+                    } else {
+                        out.writeUTF("")
+                        out.writeInt(0)
+                        out.writeInt(0)
+                        out.writeUTF("")
+                    }
+                }
+                baos.toByteArray()
+            }
+
+            val nonce12 = ByteArray(12).also { SecureRandom().nextBytes(it) }
+            val aad = "ZT2-STATUS-META|${item.statusId}|$localOnion".toByteArray(Charsets.UTF_8)
+            val metaCt = RustCoreBridge.aeadEncryptChaCha20Poly1305(statusKey32, nonce12, metaBytes, aad)
+            Arrays.fill(metaBytes, 0.toByte())
+            chunkBundle?.wipeZeroize()
+
+            val transcript = "ZT2-STATUS-V1|${item.statusId}|$localOnion|${nonce12.toHex()}|${metaCt.toHex()}"
+                .toByteArray(Charsets.UTF_8)
+            val sig = RustCoreBridge.signPeerHelloTranscript(transcript) ?: return@withContext false
+
+            channel.sendStatusItemFrame(item.statusId, nonce12, metaCt, sig)
+            true
+        } catch (_: Throwable) {
+            false
+        } finally {
+            Arrays.fill(statusKey32, 0.toByte())
+        }
+    }
+
+    private suspend fun handleIncomingStatusItem(
+        channel: PeerSocketChannel,
+        peerOnion: String,
+        statusId: String,
+        metaNonce12: ByteArray,
+        metaCt: ByteArray
+    ) {
+        val statusKey32 = RustCoreBridge.deriveStaticPeerStatusKey32(channel.peerHello.x25519PublicKey, statusId)
+            ?: return
+        try {
+            val aad = "ZT2-STATUS-META|$statusId|$peerOnion".toByteArray(Charsets.UTF_8)
+            val metaBytes = RustCoreBridge.aeadDecryptChaCha20Poly1305(statusKey32, metaNonce12, metaCt, aad)
+            DataInputStream(ByteArrayInputStream(metaBytes)).use { inp ->
+                val decId = inp.readUTF()
+                val authorAlias = inp.readUTF()
+                val mediaType = try {
+                    StatusMediaType.valueOf(inp.readUTF())
+                } catch (_: Exception) {
+                    StatusMediaType.TEXT_CARD
+                }
+                val captionText = inp.readUTF()
+                val backgroundHex = inp.readUTF()
+                val createdAt = inp.readLong()
+                val expiresAt = inp.readLong()
+                val mimeType = inp.readUTF().ifBlank { null }
+                val fileName = inp.readUTF().ifBlank { null }
+                val transferId = inp.readUTF()
+                val totalSizeBytes = inp.readInt()
+                val totalChunks = inp.readInt()
+                val sha256Hex = inp.readUTF()
+
+                if (System.currentTimeMillis() >= expiresAt) {
+                    Arrays.fill(metaBytes, 0.toByte())
+                    return
+                }
+
+                var decryptedMedia: ByteArray? = null
+                if (totalChunks > 0 && transferId.isNotBlank()) {
+                    val fileKey32 = readBytes(inp)
+                    val chunks = awaitAndTakeMediaChunks(transferId, totalChunks)
+                    if (chunks != null) {
+                        val manifest = EncryptedFileManifest(
+                            transferId = transferId,
+                            sanitizedFileName = fileName ?: "status_media.bin",
+                            mimeType = mimeType ?: "application/octet-stream",
+                            totalSizeBytes = totalSizeBytes,
+                            totalChunks = totalChunks,
+                            sha256DigestHex = sha256Hex
+                        )
+                        decryptedMedia = EncryptedFileTransferEngine.decryptAndVerifyChunks(
+                            manifest = manifest,
+                            fileSecretKey32 = fileKey32,
+                            chunks = chunks
+                        )
+                        chunks.forEach { it.wipeZeroize() }
+                    }
+                    Arrays.fill(fileKey32, 0.toByte())
+                }
+                Arrays.fill(metaBytes, 0.toByte())
+
+                // If peer sent media card but media chunks failed integrity/assembly, skip corrupt item
+                if (totalChunks > 0 && decryptedMedia == null) return
+
+                val item = EphemeralStatusItem(
+                    statusId = decId,
+                    authorAlias = authorAlias,
+                    authorOnion = peerOnion,
+                    isOwnStatus = false,
+                    mediaType = mediaType,
+                    captionText = captionText,
+                    backgroundHex = backgroundHex,
+                    createdAtEpochMillis = createdAt,
+                    expiresOnSessionClose = false,
+                    privacyPolicy = StatusPrivacyPolicy.ALL_VERIFIED_CONTACTS,
+                    encryptedPayloadBytes = decryptedMedia,
+                    viewedByLocalUser = false,
+                    expiresAtEpochMillis = expiresAt,
+                    mimeType = mimeType,
+                    sanitizedFileName = fileName
+                )
+                _peerTransportEvents.tryEmit(PeerTransportEvent.IncomingStatusItem(peerOnion, item))
+            }
+        } finally {
+            Arrays.fill(statusKey32, 0.toByte())
         }
     }
 

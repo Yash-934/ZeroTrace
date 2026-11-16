@@ -38,8 +38,8 @@ val ZeroTraceOutgoingBubble = OutgoingBubbleDark
 val ZeroTraceSurfaceElevated = IncomingBubbleDark
 
 enum class AppThemeMode(val labelEn: String, val labelHi: String) {
-    DARK("Dark (Obsidian Default)", "डार्क (डिफ़ॉल्ट)"),
-    LIGHT("Light", "लाइट"),
+    LIGHT("Light (Default)", "लाइट (डिफ़ॉल्ट)"),
+    DARK("Dark (Obsidian)", "डार्क (ऑब्सीडियन)"),
     SYSTEM("System Default", "सिस्टम डिफ़ॉल्ट");
 
     val label: String get() = labelEn
@@ -54,11 +54,46 @@ enum class AccentPalette(val labelEn: String, val primaryColor: Color, val conta
 }
 
 enum class ChatWallpaperStyle(val labelEn: String, val bgColorDark: Color, val bgColorLight: Color) {
-    OBSIDIAN_GRID("Obsidian Carbon", Color(0xFF070B0E), Color(0xFFECE5DD)),
-    DEEP_EMERALD_MESH("Encrypted Forest", Color(0xFF05130D), Color(0xFFE1F3E8)),
-    PURE_BLACK_AMOLED("Pure Pitch Black", Color(0xFF000000), Color(0xFFF5F7FA));
+    OBSIDIAN_GRID("Clean Slate", Color(0xFF070B0E), Color(0xFFF5F7F9)),
+    DEEP_EMERALD_MESH("Encrypted Forest", Color(0xFF05130D), Color(0xFFECFDF5)),
+    PURE_BLACK_AMOLED("Pure Contrast", Color(0xFF000000), Color(0xFFFFFFFF));
 
     val label: String get() = labelEn
+}
+
+object ZeroTracePalette {
+    @Composable
+    fun isLight(): Boolean = MaterialTheme.colorScheme.background.red > 0.5f &&
+        MaterialTheme.colorScheme.background.green > 0.5f &&
+        MaterialTheme.colorScheme.background.blue > 0.5f
+
+    @Composable
+    fun outgoingBubble(): Color = if (isLight()) Color(0xFFC2F8D0) else OutgoingBubbleDark
+
+    @Composable
+    fun incomingBubble(): Color = if (isLight()) Color.White else IncomingBubbleDark
+
+    @Composable
+    fun bubbleInnerCard(): Color = if (isLight()) Color(0xFFF3F5F7) else Color.Black.copy(alpha = 0.25f)
+
+    @Composable
+    fun accentEmerald(): Color = MaterialTheme.colorScheme.primary
+
+    @Composable
+    fun accentTeal(): Color = MaterialTheme.colorScheme.secondary
+
+    @Composable
+    fun accentAmber(): Color = MaterialTheme.colorScheme.tertiary
+
+    @Composable
+    fun mintContainer(): Color = MaterialTheme.colorScheme.primaryContainer
+
+    @Composable
+    fun mintContent(): Color = MaterialTheme.colorScheme.onPrimaryContainer
+
+    @Composable
+    fun chatWallpaper(style: ChatWallpaperStyle): Color =
+        if (isLight()) style.bgColorLight else style.bgColorDark
 }
 
 val SpaceGroteskFamily = FontFamily(
@@ -164,7 +199,7 @@ val ZeroTraceTypography = Typography(
 
 @Composable
 fun ZeroTraceTheme(
-    themeMode: AppThemeMode = AppThemeMode.DARK,
+    themeMode: AppThemeMode = AppThemeMode.LIGHT,
     accentPalette: AccentPalette = AccentPalette.EMERALD,
     content: @Composable () -> Unit
 ) {
@@ -172,6 +207,12 @@ fun ZeroTraceTheme(
         AppThemeMode.DARK -> true
         AppThemeMode.LIGHT -> false
         AppThemeMode.SYSTEM -> isSystemInDarkTheme()
+    }
+
+    val lightPrimary = when (accentPalette) {
+        AccentPalette.EMERALD -> Color(0xFF00C15B)
+        AccentPalette.CYBER_TEAL -> Color(0xFF00897B)
+        AccentPalette.NEON_CYAN -> Color(0xFF0284C7)
     }
 
     val colorScheme = if (useDark) {
@@ -198,24 +239,24 @@ fun ZeroTraceTheme(
         )
     } else {
         lightColorScheme(
-            primary = Color(0xFF008048),
+            primary = lightPrimary,
             onPrimary = Color.White,
-            primaryContainer = Color(0xFFD2F8E5),
-            onPrimaryContainer = Color(0xFF002110),
-            secondary = Color(0xFF006874),
+            primaryContainer = Color(0xFFC2F8D0),
+            onPrimaryContainer = Color(0xFF052E16),
+            secondary = Color(0xFF0F766E),
             onSecondary = Color.White,
-            secondaryContainer = Color(0xFF9EEFFD),
-            onSecondaryContainer = Color(0xFF001F24),
-            tertiary = Color(0xFFB26A00),
+            secondaryContainer = Color(0xFFCCFBF1),
+            onSecondaryContainer = Color(0xFF134E4A),
+            tertiary = Color(0xFFB45309),
             onTertiary = Color.White,
-            background = Color(0xFFF4F7F6),
-            onBackground = Color(0xFF0F171E),
-            surface = Color.White,
-            onSurface = Color(0xFF0F171E),
-            surfaceVariant = Color(0xFFE7ECEA),
-            onSurfaceVariant = Color(0xFF475569),
-            outline = Color(0xFFCBD5E1),
-            error = Color(0xFFD32F2F),
+            background = Color(0xFFFFFFFF),
+            onBackground = Color(0xFF111827),
+            surface = Color(0xFFFFFFFF),
+            onSurface = Color(0xFF111827),
+            surfaceVariant = Color(0xFFEBEFF3),
+            onSurfaceVariant = Color(0xFF6B7280),
+            outline = Color(0xFFE5E7EB),
+            error = Color(0xFFEF4444),
             onError = Color.White
         )
     }

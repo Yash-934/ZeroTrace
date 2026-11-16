@@ -1422,6 +1422,22 @@ object RustCoreBridge {
         return shared
     }
 
+    fun deriveStaticPeerStatusKey32(peerX25519Pk: ByteArray, statusId: String): ByteArray? {
+        val holder = activeIdentity ?: return null
+        if (peerX25519Pk.size != 32) return null
+        val dh = computeX25519(holder.x25519Sk, peerX25519Pk)
+        return try {
+            hkdfExpand(
+                salt = statusId.toByteArray(Charsets.UTF_8),
+                ikm = dh,
+                info = "ZT2-STATUS-KEY-V1".toByteArray(Charsets.UTF_8),
+                outLen = 32
+            )
+        } finally {
+            Arrays.fill(dh, 0.toByte())
+        }
+    }
+
     fun hkdfExpand(salt: ByteArray, ikm: ByteArray, info: ByteArray, outLen: Int): ByteArray {
         val hkdf = HKDFBytesGenerator(SHA256Digest())
         hkdf.init(HKDFParameters(ikm, salt, info))

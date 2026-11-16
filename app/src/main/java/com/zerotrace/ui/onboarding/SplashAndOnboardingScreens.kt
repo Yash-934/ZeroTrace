@@ -313,7 +313,7 @@ fun ZeroTraceOnboardingScreen(
             onClick = onProceed,
             enabled = limitationsAccepted,
             colors = ButtonDefaults.buttonColors(
-                containerColor = EmeraldPrimary,
+                containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary
             ),
             shape = RoundedCornerShape(12.dp),

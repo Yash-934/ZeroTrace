@@ -733,6 +733,13 @@ object EncryptedCallMediaEngine {
 
         startPriorityWriterLoop()
         startAudioCaptureAndPlayback()
+        sendControlStateSync()
+    }
+
+    fun resyncControlState() {
+        if (isActive.get()) {
+            sendControlStateSync()
+        }
     }
 
     private fun isLoopbackHost(host: String): Boolean {
@@ -816,7 +823,10 @@ object EncryptedCallMediaEngine {
                 mediaOut = null
             }
         }
-        fallbackSender?.invoke(frameBytes)
+        try {
+            fallbackSender?.invoke(frameBytes)
+        } catch (_: Throwable) {
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -942,7 +952,12 @@ object EncryptedCallMediaEngine {
         lastVideoFrameSentMs.set(now)
 
         try {
-            val jpegBytes = yuvImageProxyToCompactJpeg(imageProxy, maxEdge = 240, quality = 42, isFrontCamera = isFrontCamera)
+            var jpegBytes = yuvImageProxyToCompactJpeg(imageProxy, maxEdge = 240, quality = 48, isFrontCamera = isFrontCamera)
+            if (jpegBytes != null && jpegBytes.size > 22_000) {
+                // Keep video frames lean over Tor circuits to avoid head-of-line audio jitter
+                Arrays.fill(jpegBytes, 0.toByte())
+                jpegBytes = yuvImageProxyToCompactJpeg(imageProxy, maxEdge = 192, quality = 34, isFrontCamera = isFrontCamera)
+            }
             if (jpegBytes != null && jpegBytes.isNotEmpty()) {
                 val encrypted = buildEncryptedMediaFrame(
                     streamId = STREAM_VIDEO,
@@ -965,38 +980,109 @@ object EncryptedCallMediaEngine {
         }
     }
 
+    /**
+     * Converts Camera2 / CameraX YUV_420_888 planes with arbitrary rowStride and pixelStride
+     * cleanly into tightly packed canonical NV21 without corrupting chroma alignment or green/purple bands.
+     */
+    fun yuv420888PlanesToNv21(
+        width: Int,
+        height: Int,
+        yBuffer: ByteBuffer,
+        yRowStride: Int,
+        yPixelStride: Int,
+        uBuffer: ByteBuffer,
+        uRowStride: Int,
+        uPixelStride: Int,
+        vBuffer: ByteBuffer,
+        vRowStride: Int,
+        vPixelStride: Int
+    ): ByteArray {
+        val yDup = yBuffer.duplicate()
+        val uDup = uBuffer.duplicate()
+        val vDup = vBuffer.duplicate()
+        val ySize = width * height
+        val nv21 = ByteArray(ySize + (ySize / 2))
+
+        var outPos = 0
+        val yLimit = yDup.limit()
+        if (yPixelStride == 1 && yRowStride == width && yLimit >= ySize) {
+            yDup.position(0)
+            yDup.get(nv21, 0, ySize)
+            outPos = ySize
+        } else {
+            for (row in 0 until height) {
+                val rowBase = row * yRowStride
+                if (yPixelStride == 1 && rowBase + width <= yLimit) {
+                    yDup.position(rowBase)
+                    yDup.get(nv21, outPos, width)
+                    outPos += width
+                } else {
+                    for (col in 0 until width) {
+                        val idx = rowBase + col * yPixelStride
+                        nv21[outPos++] = if (idx < yLimit) yDup.get(idx) else 0
+                    }
+                }
+            }
+        }
+
+        val chromaH = height / 2
+        val chromaW = width / 2
+        val uLimit = uDup.limit()
+        val vLimit = vDup.limit()
+        for (row in 0 until chromaH) {
+            val vRowBase = row * vRowStride
+            val uRowBase = row * uRowStride
+            for (col in 0 until chromaW) {
+                val vIdx = vRowBase + col * vPixelStride
+                val uIdx = uRowBase + col * uPixelStride
+                nv21[outPos++] = if (vIdx < vLimit) vDup.get(vIdx) else 128.toByte()
+                nv21[outPos++] = if (uIdx < uLimit) uDup.get(uIdx) else 128.toByte()
+            }
+        }
+        return nv21
+    }
+
     private fun yuvImageProxyToCompactJpeg(
         image: ImageProxy,
         maxEdge: Int,
         quality: Int,
         isFrontCamera: Boolean
     ): ByteArray? {
+        if (image.width <= 0 || image.height <= 0) return null
         val yPlane = image.planes.getOrNull(0) ?: return null
         val uPlane = image.planes.getOrNull(1) ?: return null
         val vPlane = image.planes.getOrNull(2) ?: return null
 
-        val ySize = yPlane.buffer.remaining()
-        val uSize = uPlane.buffer.remaining()
-        val vSize = vPlane.buffer.remaining()
-        val nv21 = ByteArray(ySize + uSize + vSize)
-
-        yPlane.buffer.get(nv21, 0, ySize)
-        vPlane.buffer.get(nv21, ySize, vSize)
-        uPlane.buffer.get(nv21, ySize + vSize, uSize)
+        val nv21 = yuv420888PlanesToNv21(
+            width = image.width,
+            height = image.height,
+            yBuffer = yPlane.buffer,
+            yRowStride = yPlane.rowStride,
+            yPixelStride = yPlane.pixelStride,
+            uBuffer = uPlane.buffer,
+            uRowStride = uPlane.rowStride,
+            uPixelStride = uPlane.pixelStride,
+            vBuffer = vPlane.buffer,
+            vRowStride = vPlane.rowStride,
+            vPixelStride = vPlane.pixelStride
+        )
 
         val yuv = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
         val rawJpegOut = ByteArrayOutputStream()
-        yuv.compressToJpeg(Rect(0, 0, image.width, image.height), 60, rawJpegOut)
+        yuv.compressToJpeg(Rect(0, 0, image.width, image.height), 72, rawJpegOut)
         val rawJpeg = rawJpegOut.toByteArray()
         Arrays.fill(nv21, 0.toByte())
 
         val decoded = BitmapFactory.decodeByteArray(rawJpeg, 0, rawJpeg.size) ?: return null
         Arrays.fill(rawJpeg, 0.toByte())
 
-        val rot = image.imageInfo.rotationDegrees.toFloat()
-        val scale = maxEdge.toFloat() / max(decoded.width, decoded.height).toFloat().coerceAtLeast(1f)
+        val rotDeg = image.imageInfo.rotationDegrees
+        val rotatedW = if (rotDeg % 180 != 0) decoded.height else decoded.width
+        val rotatedH = if (rotDeg % 180 != 0) decoded.width else decoded.height
+        val scale = (maxEdge.toFloat() / max(rotatedW, rotatedH).toFloat().coerceAtLeast(1f)).coerceAtMost(1f)
+
         val matrix = Matrix().apply {
-            if (rot != 0f) postRotate(rot)
+            if (rotDeg != 0) postRotate(rotDeg.toFloat())
             if (isFrontCamera) postScale(-1f, 1f)
             if (scale < 1f) postScale(scale, scale)
         }

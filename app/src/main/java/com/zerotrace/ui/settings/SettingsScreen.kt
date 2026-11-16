@@ -3,6 +3,7 @@ package com.zerotrace.ui.settings
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -12,26 +13,28 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.DeleteForever
-import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.QrCode
-import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -50,6 +53,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -61,19 +65,15 @@ import com.zerotrace.network.TorTransportBackend
 import com.zerotrace.security.HardwareSecurityLevel
 import com.zerotrace.ui.AppLanguage
 import com.zerotrace.ui.ZeroTraceScreen
-import com.zerotrace.ui.components.ContactAvatar
-import com.zerotrace.ui.components.ZeroTraceTopBar
 import com.zerotrace.ui.theme.AccentPalette
 import com.zerotrace.ui.theme.AppThemeMode
 import com.zerotrace.ui.theme.ChatWallpaperStyle
-import com.zerotrace.ui.theme.AmberWarning
 import com.zerotrace.ui.theme.CrimsonDanger
-import com.zerotrace.ui.theme.CyanAccent
-import com.zerotrace.ui.theme.EmeraldPrimary
 import com.zerotrace.ui.theme.MonospaceStyle
+import com.zerotrace.ui.theme.ZeroTracePalette
 
 /**
- * Screen 13 of Section 4: WhatsApp-Style Settings Tab
+ * Settings Screen matching Mockup Screen 8 (flat WhatsApp-style icon + title + subtitle rows)
  */
 @Composable
 fun ZeroTraceSettingsScreen(
@@ -107,6 +107,13 @@ fun ZeroTraceSettingsScreen(
 ) {
     val isHi = language == AppLanguage.HINDI
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
+
+    val chipColors = FilterChipDefaults.filterChipColors(
+        selectedContainerColor = MaterialTheme.colorScheme.primary,
+        selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
+        containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        labelColor = MaterialTheme.colorScheme.onSurface
+    )
 
     if (showDeleteConfirmDialog) {
         AlertDialog(
@@ -148,15 +155,45 @@ fun ZeroTraceSettingsScreen(
 
     Scaffold(
         topBar = {
-            ZeroTraceTopBar(
-                title = if (isHi) "सेटिंग्स" else "Settings",
-                subtitle = "Identity, Privacy, Appearance & Tor Transport",
-                connectivityState = connectivityState,
-                torProgress = torProgress,
-                onQrScannerClick = { onNavigate(ZeroTraceScreen.MY_IDENTITY) },
-                onSecurityDashboardClick = { onNavigate(ZeroTraceScreen.SECURITY_DASHBOARD) },
-                onEmergencyWipeClick = onDisconnectAllSessions
-            )
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = if (ZeroTracePalette.isLight()) 0.dp else 3.dp
+            ) {
+                Column(modifier = Modifier.statusBarsPadding()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back",
+                                tint = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Column {
+                            Text(
+                                text = if (isHi) "सेटिंग्स" else "Settings",
+                                style = MaterialTheme.typography.headlineMedium.copy(
+                                    fontSize = 20.sp,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "TOR v3 • ${connectivityState.code}" +
+                                    if (torProgress in 1..99) " ($torProgress%)" else "",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
+                }
+            }
         },
         containerColor = MaterialTheme.colorScheme.background
     ) { padding ->
@@ -165,212 +202,141 @@ fun ZeroTraceSettingsScreen(
                 .fillMaxSize()
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 12.dp)
-                .testTag("settings_screen"),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+                .testTag("settings_screen")
         ) {
-            // 1. WhatsApp-Style Profile Header Card
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                shape = RoundedCornerShape(18.dp),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onNavigate(ZeroTraceScreen.MY_IDENTITY) }
+            // Top Flat WhatsApp-style Rows matching Mockup Screen 8
+            SettingsNavRow(
+                icon = Icons.Default.Info,
+                title = if (isHi) "गोपनीयता और सुरक्षा" else "Privacy & Security",
+                subtitle = if (isHi) {
+                    "एंड-टू-एंड एन्क्रिप्शन, TOR रूटिंग, गायब होने वाले संदेश"
+                } else {
+                    "End-to-end encryption, TOR routing, disappearing messages"
+                },
+                onClick = { onNavigate(ZeroTraceScreen.PRIVACY_CENTER) },
+                modifier = Modifier.testTag("open_privacy_center_card")
+            )
+
+            SettingsNavRow(
+                icon = Icons.Default.Timer,
+                title = if (isHi) "गायब होने वाले संदेश" else "Disappearing Messages",
+                subtitle = "Default: ${sessionTimeoutSeconds / 60} minutes • ${if (autoLockOnBackground) "On" else "Off"}",
+                onClick = { onNavigate(ZeroTraceScreen.PRIVACY_CENTER) }
+            )
+
+            SettingsNavRow(
+                icon = Icons.Default.AccessTime,
+                title = if (isHi) "स्टोरेज और अस्थिर RAM" else "Storage & Data",
+                subtitle = "$volatileMessagesInRamCount msgs, $volatileStatusesInRamCount statuses, $volatileCallsInRamCount calls in RAM",
+                onClick = onWipeVolatileCaches
+            )
+
+            SettingsNavRow(
+                icon = Icons.Default.VerifiedUser,
+                title = if (isHi) "सत्यापित संपर्क और PQ ऑडिट" else "Verified Contacts & PQ",
+                subtitle = "Verified PQ keys, Safety Numbers, StrongBox & JNI",
+                onClick = { onNavigate(ZeroTraceScreen.SECURITY_DASHBOARD) },
+                modifier = Modifier.testTag("open_security_dashboard_card")
+            )
+
+            SettingsNavRow(
+                icon = Icons.Default.QrCode,
+                title = if (isHi) "मेरी पहचान और QR कोड" else "My Identity & QR Code",
+                subtitle = "${identitySummary?.onionAddress ?: "No active identity"} • PQ Safety: ${identitySummary?.pqSafetyDigits?.take(12) ?: "—"}…",
+                onClick = { onNavigate(ZeroTraceScreen.MY_IDENTITY) },
+                modifier = Modifier.testTag("settings_my_qr_button")
+            )
+
+            HorizontalDivider(
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f),
+                modifier = Modifier.padding(vertical = 4.dp)
+            )
+
+            // Appearance, Theme & Language
+            SettingsSectionCard(
+                icon = Icons.Default.Palette,
+                title = if (isHi) "दिखावट और भाषा" else "Appearance & Language"
             ) {
+                Text("Theme Mode", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        ContactAvatar(
-                            alias = "ZeroTrace Node",
-                            onionAddress = identitySummary?.onionAddress ?: "local.onion",
-                            size = 58.dp
-                        )
-                        Spacer(modifier = Modifier.width(14.dp))
-                        Column {
-                            Text(
-                                text = "Local Hybrid PQ Identity",
-                                style = MaterialTheme.typography.titleMedium
-                            )
-                            Text(
-                                text = identitySummary?.onionAddress ?: "No active identity",
-                                style = MonospaceStyle.copy(fontSize = 11.sp),
-                                color = CyanAccent,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = "PQ Safety: ${identitySummary?.pqSafetyDigits?.take(19) ?: "—"}…",
-                                style = MonospaceStyle.copy(fontSize = 10.sp),
-                                color = EmeraldPrimary
-                            )
-                        }
-                    }
-                    IconButton(
-                        onClick = { onNavigate(ZeroTraceScreen.MY_IDENTITY) },
-                        modifier = Modifier.testTag("settings_my_qr_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.QrCode,
-                            contentDescription = "My QR Code",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
-            }
-
-            // 2. Quick Navigation Row: Privacy Center & Security Dashboard
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                    shape = RoundedCornerShape(14.dp),
-                    border = BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.4f)),
-                    modifier = Modifier
-                        .weight(1f)
-                        .clickable { onNavigate(ZeroTraceScreen.PRIVACY_CENTER) }
-                        .testTag("open_privacy_center_card")
-                ) {
-                    Row(
-                        modifier = Modifier.padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Icon(Icons.Default.Shield, contentDescription = null, tint = EmeraldPrimary)
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text("Privacy Center", style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                "E2EE, Locks & Metadata",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
-                    }
-                }
-
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                    shape = RoundedCornerShape(14.dp),
-                    border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.4f)),
-                    modifier = Modifier
-                        .weight(1f)
-                        .clickable { onNavigate(ZeroTraceScreen.SECURITY_DASHBOARD) }
-                        .testTag("open_security_dashboard_card")
-                ) {
-                    Row(
-                        modifier = Modifier.padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Icon(Icons.Default.Security, contentDescription = null, tint = CyanAccent)
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text("Crypto Audit", style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                "Ratchet, StrongBox & JNI",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
-                    }
-                }
-            }
-
-            // 3. Appearance, Theme, Accent & Wallpaper
-            SettingsSectionCard(title = if (isHi) "दिखावट, थीम और भाषा" else "APPEARANCE, THEME & LANGUAGE") {
-                Text("Theme Mode", style = MaterialTheme.typography.labelMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     AppThemeMode.entries.forEach { mode ->
                         FilterChip(
                             selected = themeMode == mode,
                             onClick = { onSelectThemeMode(mode) },
-                            label = { Text(mode.label, style = MaterialTheme.typography.labelSmall) }
+                            label = { Text(mode.label, style = MaterialTheme.typography.labelSmall) },
+                            shape = RoundedCornerShape(50),
+                            border = null,
+                            colors = chipColors
                         )
                     }
                 }
 
-                Text("Accent Palette", style = MaterialTheme.typography.labelMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Accent Palette", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     AccentPalette.entries.forEach { palette ->
                         FilterChip(
                             selected = accentPalette == palette,
                             onClick = { onSelectAccentPalette(palette) },
-                            label = { Text(palette.label, style = MaterialTheme.typography.labelSmall) }
+                            label = { Text(palette.label, style = MaterialTheme.typography.labelSmall) },
+                            shape = RoundedCornerShape(50),
+                            border = null,
+                            colors = chipColors
                         )
                     }
                 }
 
-                Text("Chat Wallpaper", style = MaterialTheme.typography.labelMedium)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Chat Wallpaper", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     ChatWallpaperStyle.entries.forEach { wp ->
                         FilterChip(
                             selected = wallpaperStyle == wp,
                             onClick = { onSelectWallpaperStyle(wp) },
-                            label = { Text(wp.label, style = MaterialTheme.typography.labelSmall) }
+                            label = { Text(wp.label, style = MaterialTheme.typography.labelSmall) },
+                            shape = RoundedCornerShape(50),
+                            border = null,
+                            colors = chipColors
                         )
                     }
                 }
 
-                Text("Interface Language", style = MaterialTheme.typography.labelMedium)
+                Text("Interface Language", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     AppLanguage.entries.forEach { lang ->
                         FilterChip(
                             selected = language == lang,
                             onClick = { onSelectLanguage(lang) },
-                            label = { Text(lang.displayLabel) },
+                            label = { Text(lang.displayLabel, style = MaterialTheme.typography.labelSmall) },
+                            shape = RoundedCornerShape(50),
+                            border = null,
+                            colors = chipColors,
                             modifier = Modifier.testTag("settings_lang_${lang.code}")
                         )
                     }
                 }
             }
 
-            // 4. Storage & Volatile RAM Cache Cleanup
-            SettingsSectionCard(title = "STORAGE & VOLATILE RAM CACHE") {
-                Text(
-                    text = "ZeroTrace never writes messages, media, or call logs to SQLite. Current volatile heap footprint:",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    text = "• Active Chat Messages in RAM: $volatileMessagesInRamCount\n" +
-                        "• Ephemeral Status Cards in RAM: $volatileStatusesInRamCount\n" +
-                        "• Volatile Call Log Entries in RAM: $volatileCallsInRamCount",
-                    style = MonospaceStyle.copy(fontSize = 11.sp),
-                    color = EmeraldPrimary
-                )
-                OutlinedButton(
-                    onClick = onWipeVolatileCaches,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("wipe_volatile_caches_button")
-                ) {
-                    Icon(Icons.Default.CleaningServices, contentDescription = null, tint = EmeraldPrimary)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Zeroize All Volatile Caches & Clipboard Now")
-                }
-            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f))
 
-            // 5. Session Timeout & Screenshot Protection
+            // Session Timeout & Screen Security
             SettingsSectionCard(title = "SESSION TIMEOUT & SCREEN SECURITY") {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(60L to "1 min", 300L to "5 min", 900L to "15 min").forEach { (sec, label) ->
                         FilterChip(
                             selected = sessionTimeoutSeconds == sec,
                             onClick = { onSelectTimeoutSeconds(sec) },
-                            label = { Text(label) }
+                            label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                            shape = RoundedCornerShape(50),
+                            border = null,
+                            colors = chipColors
                         )
                     }
                 }
@@ -414,10 +380,34 @@ fun ZeroTraceSettingsScreen(
                 }
             }
 
-            // 6. Tor Network Transport Configuration
-            SettingsSectionCard(title = "TOR ONION TRANSPORT CONFIGURATION (FAIL-CLOSED)") {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f))
+
+            // Storage & Volatile RAM Cache Cleanup
+            SettingsSectionCard(title = "VOLATILE RAM CACHE CLEANUP") {
                 Text(
-                    text = "Direct clearnet IP fallback is strictly disabled. Embedded Tor connects peers across different mobile data/Wi-Fi networks without Orbot or same-Wi-Fi; external Tor SOCKS5 and local Wi-Fi/Hotspot P2P remain optional backends.",
+                    text = "ZeroTrace never writes messages, media, or call logs to SQLite ($volatileMessagesInRamCount msgs • $volatileStatusesInRamCount statuses • $volatileCallsInRamCount calls in RAM).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedButton(
+                    onClick = onWipeVolatileCaches,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("wipe_volatile_caches_button")
+                ) {
+                    Icon(Icons.Default.CleaningServices, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Zeroize All Volatile Caches & Clipboard Now")
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f))
+
+            // Tor Network Transport Configuration
+            SettingsSectionCard(title = "TOR ONION TRANSPORT (FAIL-CLOSED)") {
+                Text(
+                    text = "Direct clearnet IP fallback is strictly disabled. Embedded Tor connects peers across different mobile data/Wi-Fi networks without Orbot or same-Wi-Fi.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -431,6 +421,9 @@ fun ZeroTraceSettingsScreen(
                                 style = MaterialTheme.typography.labelSmall
                             )
                         },
+                        shape = RoundedCornerShape(12.dp),
+                        border = null,
+                        colors = chipColors,
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("transport_mode_${mode.name}")
@@ -438,23 +431,27 @@ fun ZeroTraceSettingsScreen(
                 }
             }
 
-            // 7. Emergency Session & Identity Destruction Controls
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f))
+
+            // Emergency Session & Identity Destruction Controls
             SettingsSectionCard(title = "EMERGENCY SESSION & IDENTITY CONTROLS") {
                 OutlinedButton(
                     onClick = onDisconnectAllSessions,
+                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(48.dp)
                         .testTag("settings_disconnect_all_button")
                 ) {
-                    Icon(Icons.Default.PowerSettingsNew, contentDescription = null, tint = AmberWarning)
+                    Icon(Icons.Default.PowerSettingsNew, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Disconnect All Sessions & Wipe RAM", color = AmberWarning)
+                    Text("Disconnect All Sessions & Wipe RAM", color = MaterialTheme.colorScheme.tertiary)
                 }
 
                 Button(
                     onClick = { showDeleteConfirmDialog = true },
                     colors = ButtonDefaults.buttonColors(containerColor = CrimsonDanger),
+                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(48.dp)
@@ -466,8 +463,10 @@ fun ZeroTraceSettingsScreen(
                 }
             }
 
-            // 8. About & Open-Source Licenses
-            SettingsSectionCard(title = "ABOUT, LIMITATIONS & OPEN-SOURCE LICENSES") {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f))
+
+            // About & Open-Source Licenses
+            SettingsSectionCard(title = "ABOUT & CRYPTOGRAPHIC SPECIFICATIONS") {
                 Text(
                     text = "ZeroTrace Messenger 2.0 (v2.0.0-strict-ephemeral)\n" +
                         "• Classical Crypto: X25519 (RFC 7748) & Ed25519 (RFC 8032)\n" +
@@ -484,8 +483,51 @@ fun ZeroTraceSettingsScreen(
     }
 }
 
+@Composable
+private fun SettingsNavRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(22.dp)
+        )
+        Spacer(modifier = Modifier.width(18.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium.copy(
+                    fontSize = 15.5.sp,
+                    fontWeight = FontWeight.SemiBold
+                ),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.5.sp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
 /**
- * Screen 14 of Section 4: Dedicated Privacy Center Screen
+ * Dedicated Privacy Center Screen
  */
 @Composable
 fun ZeroTracePrivacyCenterScreen(
@@ -510,15 +552,54 @@ fun ZeroTracePrivacyCenterScreen(
 ) {
     BackHandler(onBack = onBack)
 
+    val chipColors = FilterChipDefaults.filterChipColors(
+        selectedContainerColor = MaterialTheme.colorScheme.primary,
+        selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
+        containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        labelColor = MaterialTheme.colorScheme.onSurface
+    )
+
     Scaffold(
         topBar = {
-            ZeroTraceTopBar(
-                title = "Privacy Center",
-                subtitle = "Zero-Trust Controls, Keystore & Metadata Hardening",
-                connectivityState = connectivityState,
-                torProgress = torProgress,
-                onBackClick = onBack
-            )
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = if (ZeroTracePalette.isLight()) 0.dp else 3.dp
+            ) {
+                Column(modifier = Modifier.statusBarsPadding()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back",
+                                tint = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Column {
+                            Text(
+                                text = "Privacy & Security",
+                                style = MaterialTheme.typography.headlineMedium.copy(
+                                    fontSize = 20.sp,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "TOR v3 • ${connectivityState.code}" +
+                                    if (torProgress in 1..99) " ($torProgress%)" else "",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
+                }
+            }
         },
         containerColor = MaterialTheme.colorScheme.background
     ) { padding ->
@@ -527,20 +608,27 @@ fun ZeroTracePrivacyCenterScreen(
                 .fillMaxSize()
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp)
-                .testTag("privacy_center_screen"),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+                .testTag("privacy_center_screen")
         ) {
-            SettingsSectionCard(title = "CRYPTOGRAPHIC & HARDWARE STATUS") {
-                Text(
-                    text = "• E2EE Protocol: ZT-PQXDH-P2P-v1 + Hybrid Double Ratchet + Periodic ML-KEM-1024 Braid\n" +
-                        "• Hardware Key Backing: ${hardwareSecurityLevel.name}\n" +
-                        "• Tor Fail-Closed Routing: Active (${connectivityState.code})\n" +
-                        "• Cloud Backups: Hard-Disabled (allowBackup=false)",
-                    style = MonospaceStyle.copy(fontSize = 11.sp),
-                    color = EmeraldPrimary
-                )
+            SettingsSectionCard(icon = Icons.Default.Shield, title = "CRYPTOGRAPHIC & HARDWARE STATUS") {
+                Surface(
+                    color = ZeroTracePalette.mintContainer(),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "• E2EE Protocol: ZT-PQXDH-P2P-v1 + Hybrid Double Ratchet\n" +
+                            "• Hardware Key Backing: ${hardwareSecurityLevel.name}\n" +
+                            "• Tor Fail-Closed Routing: Active (${connectivityState.code})\n" +
+                            "• Cloud Backups: Hard-Disabled (allowBackup=false)",
+                        style = MonospaceStyle.copy(fontSize = 11.sp),
+                        color = ZeroTracePalette.mintContent(),
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
             }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f))
 
             SettingsSectionCard(title = "SCREEN & APP LOCK HARDENING") {
                 PrivacyToggleRow(
@@ -565,6 +653,8 @@ fun ZeroTracePrivacyCenterScreen(
                 )
             }
 
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f))
+
             SettingsSectionCard(title = "DISAPPEARING SESSION TIMER") {
                 Text(
                     text = "Maximum inactivity duration before volatile sessions and attachments are zeroized:",
@@ -576,11 +666,16 @@ fun ZeroTracePrivacyCenterScreen(
                         FilterChip(
                             selected = disappearingTimerSec == sec,
                             onClick = { onSelectDisappearingTimer(sec) },
-                            label = { Text(label) }
+                            label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                            shape = RoundedCornerShape(50),
+                            border = null,
+                            colors = chipColors
                         )
                     }
                 }
             }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f))
 
             SettingsSectionCard(title = "METADATA MINIMIZATION & RECEIPTS") {
                 PrivacyToggleRow(
@@ -604,6 +699,7 @@ fun ZeroTracePrivacyCenterScreen(
                     onCheckedChange = onToggleTypingIndicators
                 )
             }
+            Spacer(modifier = Modifier.height(32.dp))
         }
     }
 }
@@ -635,25 +731,33 @@ private fun PrivacyToggleRow(
 
 @Composable
 private fun SettingsSectionCard(
+    icon: ImageVector? = null,
     title: String,
     content: @Composable () -> Unit
 ) {
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(16.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-        modifier = Modifier.fillMaxWidth()
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+            }
             Text(
                 text = title,
                 style = MaterialTheme.typography.labelLarge,
-                color = CyanAccent
+                color = MaterialTheme.colorScheme.primary
             )
-            content()
         }
+        content()
     }
 }
+

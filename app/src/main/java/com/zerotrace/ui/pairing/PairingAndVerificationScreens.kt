@@ -427,14 +427,14 @@ fun AddContactScreen(
                     shape = RoundedCornerShape(14.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .border(1.5.dp, CyanAccent.copy(alpha = 0.65f), RoundedCornerShape(14.dp))
+                        .border(1.5.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.65f), RoundedCornerShape(14.dp))
                 ) {
                     Column(
                         modifier = Modifier.padding(14.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.PhotoLibrary, contentDescription = null, tint = CyanAccent)
+                            Icon(Icons.Default.PhotoLibrary, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = if (isHi) {
@@ -443,7 +443,7 @@ fun AddContactScreen(
                                     "UPLOAD QR FROM GALLERY / SCREENSHOT"
                                 },
                                 style = MaterialTheme.typography.titleSmall,
-                                color = CyanAccent
+                                color = MaterialTheme.colorScheme.secondary
                             )
                         }
                         Text(
@@ -461,19 +461,21 @@ fun AddContactScreen(
                                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                                 )
                             },
-                            colors = ButtonDefaults.buttonColors(containerColor = CyanAccent),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.secondary,
+                                contentColor = MaterialTheme.colorScheme.onSecondary
+                            ),
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(48.dp)
                                 .testTag("upload_qr_gallery_button")
                         ) {
-                            Icon(Icons.Default.PhotoLibrary, contentDescription = null, tint = Color.Black)
+                            Icon(Icons.Default.PhotoLibrary, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = if (isHi) "गैलरी से QR फोटो चुनें" else "SELECT QR IMAGE FROM GALLERY",
-                                style = MaterialTheme.typography.labelLarge,
-                                color = Color.Black
+                                style = MaterialTheme.typography.labelLarge
                             )
                         }
                     }
@@ -594,7 +596,7 @@ fun AddContactScreen(
                         Text(
                             text = if (isHi) "हस्ताक्षरित ZT2|v1 पेलोड सत्यापित करें" else "VERIFY SIGNED ZT2|v1 PAYLOAD STRING",
                             style = MaterialTheme.typography.labelLarge,
-                            color = CyanAccent
+                            color = MaterialTheme.colorScheme.secondary
                         )
                         OutlinedTextField(
                             value = manualQrInput,
@@ -783,7 +785,7 @@ fun ContactVerificationScreen(
                     Text(
                         text = "Onion: ${scannedInvite.onionAddress}",
                         style = MaterialTheme.typography.labelSmall,
-                        color = CyanAccent
+                        color = MaterialTheme.colorScheme.secondary
                     )
                     Text(
                         text = "Classical Safety Digits (Ed25519 + X25519):\n${scannedInvite.classicalSafetyDigits}",
@@ -819,7 +821,7 @@ fun ContactVerificationScreen(
                         Text(
                             text = if (isHi) "मेरी पहचान (तुलना के लिए)" else "MY LOCAL IDENTITY (FOR SIDE-BY-SIDE COMPARISON)",
                             style = MaterialTheme.typography.labelLarge,
-                            color = CyanAccent
+                            color = MaterialTheme.colorScheme.secondary
                         )
                         Text(
                             text = "My Classical Safety Digits:\n${localIdentity.classicalSafetyDigits}",

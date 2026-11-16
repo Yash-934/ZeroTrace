@@ -509,9 +509,12 @@ object EncryptedFileTransferEngine {
 // Section 7: Ephemeral P2P Status / Updates Models
 // =========================================================================
 
+const val STATUS_TTL_24H_MS: Long = 24L * 60L * 60L * 1000L
+
 enum class StatusMediaType {
     TEXT_CARD,
-    IMAGE_CARD
+    IMAGE_CARD,
+    VIDEO_CARD
 }
 
 enum class StatusPrivacyPolicy {
@@ -528,11 +531,19 @@ data class EphemeralStatusItem(
     val captionText: String,
     val backgroundHex: String,
     val createdAtEpochMillis: Long,
-    val expiresOnSessionClose: Boolean = true,
+    val expiresOnSessionClose: Boolean = false,
     val privacyPolicy: StatusPrivacyPolicy = StatusPrivacyPolicy.ALL_VERIFIED_CONTACTS,
     val encryptedPayloadBytes: ByteArray? = null,
-    val viewedByLocalUser: Boolean = false
+    val viewedByLocalUser: Boolean = false,
+    val expiresAtEpochMillis: Long = createdAtEpochMillis + STATUS_TTL_24H_MS,
+    val mimeType: String? = null,
+    val sanitizedFileName: String? = null
 ) {
+    fun isExpired(nowMs: Long = System.currentTimeMillis()): Boolean = nowMs >= expiresAtEpochMillis
+
+    fun remainingHours(): Long =
+        ((expiresAtEpochMillis - System.currentTimeMillis()).coerceAtLeast(0L) + 3_599_999L) / 3_600_000L
+
     fun wipeFromRam() {
         encryptedPayloadBytes?.let { Arrays.fill(it, 0.toByte()) }
     }

@@ -434,7 +434,7 @@ fun IdentitySummaryCard(
             KeyDetailBlock(
                 label = if (isHi) "TOR V3 अनियन पता (नेटवर्क पहचान)" else "TOR V3 ONION ENDPOINT (SEPARATE FROM IDENTITY)",
                 value = summary.onionAddress,
-                accentColor = CyanAccent
+                accentColor = MaterialTheme.colorScheme.secondary
             )
 
             KeyDetailBlock(

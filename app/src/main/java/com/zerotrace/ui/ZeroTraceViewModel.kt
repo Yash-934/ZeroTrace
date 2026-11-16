@@ -20,6 +20,7 @@ import com.zerotrace.bridge.ParsedQrInvite
 import com.zerotrace.bridge.PublicIdentitySummary
 import com.zerotrace.bridge.RichConversationMessage
 import com.zerotrace.bridge.RustCoreBridge
+import com.zerotrace.bridge.STATUS_TTL_24H_MS
 import com.zerotrace.bridge.SessionRatchetMetrics
 import com.zerotrace.bridge.StatusMediaType
 import com.zerotrace.bridge.StatusPrivacyPolicy
@@ -29,6 +30,7 @@ import com.zerotrace.bridge.VerifiedContactRecord
 import com.zerotrace.bridge.VolatileCallHistoryEntry
 import com.zerotrace.bridge.VolatileChatMessage
 import com.zerotrace.media.EncryptedCallMediaEngine
+import com.zerotrace.media.MediaExportAndOpenHelper
 import com.zerotrace.media.MediaRamLoader
 import com.zerotrace.media.VoiceNotePlayer
 import com.zerotrace.media.VoiceNoteRecorder
@@ -105,7 +107,7 @@ data class ZeroTraceUiState(
     val currentScreen: ZeroTraceScreen = ZeroTraceScreen.SPLASH,
     val selectedBottomTab: MainBottomTab = MainBottomTab.CHATS,
     val language: AppLanguage = AppLanguage.ENGLISH,
-    val themeMode: AppThemeMode = AppThemeMode.DARK,
+    val themeMode: AppThemeMode = AppThemeMode.LIGHT,
     val accentPalette: AccentPalette = AccentPalette.EMERALD,
     val wallpaperStyle: ChatWallpaperStyle = ChatWallpaperStyle.OBSIDIAN_GRID,
     val limitationsAccepted: Boolean = false,
@@ -220,6 +222,17 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                                 } else state
                             }
                         }
+                        // Push own non-expired (<24h) ephemeral statuses automatically to newly connected verified peer
+                        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            val now = System.currentTimeMillis()
+                            val activeOwnStatuses = _uiState.value.ephemeralStatuses.filter {
+                                it.isOwnStatus && !it.isExpired(now) &&
+                                    it.privacyPolicy == StatusPrivacyPolicy.ALL_VERIFIED_CONTACTS
+                            }
+                            for (st in activeOwnStatuses) {
+                                TorOnionTransportManager.sendStatusItemToPeer(event.peerOnion, st)
+                            }
+                        }
                     }
                     is PeerTransportEvent.PeerDisconnected -> {
                         val currentPeerOnion = _uiState.value.activePeerContact?.onionAddress
@@ -314,6 +327,35 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                         }
                     }
                     is PeerTransportEvent.IncomingCallMediaFrame -> Unit
+                    is PeerTransportEvent.IncomingStatusItem -> {
+                        val incoming = event.statusItem
+                        if (!incoming.isExpired()) {
+                            val knownAlias = _uiState.value.verifiedContacts.firstOrNull {
+                                it.onionAddress.equals(event.peerOnion, ignoreCase = true)
+                            }?.alias ?: incoming.authorAlias
+                            val resolved = incoming.copy(authorAlias = knownAlias, isOwnStatus = false)
+                            _uiState.update { state ->
+                                val alreadyPresent = state.ephemeralStatuses.any { it.statusId == resolved.statusId }
+                                if (alreadyPresent) {
+                                    resolved.wipeFromRam()
+                                    state
+                                } else {
+                                    val showBanner = state.selectedBottomTab != MainBottomTab.UPDATES
+                                    state.copy(
+                                        ephemeralStatuses = listOf(resolved) + state.ephemeralStatuses,
+                                        statusBannerMessage = if (showBanner) {
+                                            isHi(
+                                                "${resolved.authorAlias} ने नया E2EE स्टेटस साझा किया (24h में हटेगा)",
+                                                "${resolved.authorAlias} shared an E2EE status (auto-deletes in 24h)"
+                                            )
+                                        } else state.statusBannerMessage
+                                    )
+                                }
+                            }
+                        } else {
+                            incoming.wipeFromRam()
+                        }
+                    }
                 }
             }
         }
@@ -432,6 +474,23 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                                 "निष्क्रियता टाइमआउट: अस्थायी सत्र और RAM साफ़ कर दिए गए।",
                                 "Inactivity timeout reached: volatile session & RAM wiped."
                             )
+                        )
+                    }
+                }
+                // Enforce 24-hour auto-deletion & RAM zeroization for Ephemeral P2P Statuses
+                val now = System.currentTimeMillis()
+                val currentStatuses = _uiState.value.ephemeralStatuses
+                if (currentStatuses.any { it.isExpired(now) }) {
+                    currentStatuses.filter { it.isExpired(now) }.forEach { it.wipeFromRam() }
+                    val remaining = currentStatuses.filterNot { it.isExpired(now) }
+                    _uiState.update { state ->
+                        val viewingExpired = state.activeViewingStatus?.isExpired(now) == true
+                        state.copy(
+                            ephemeralStatuses = remaining,
+                            activeViewingStatus = if (viewingExpired) null else state.activeViewingStatus,
+                            currentScreen = if (viewingExpired && state.currentScreen == ZeroTraceScreen.STATUS_VIEWER) {
+                                ZeroTraceScreen.HOME
+                            } else state.currentScreen
                         )
                     }
                 }
@@ -1591,11 +1650,13 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
     // -------------------------------------------------------------------------
 
     private fun seedLoopbackPeerEphemeralStatusIfNeeded(contact: VerifiedContactRecord) {
+        if (!TorOnionTransportManager.isLoopbackVerificationContact(contact)) return
         val alreadyExists = _uiState.value.ephemeralStatuses.any {
             it.authorOnion.equals(contact.onionAddress, ignoreCase = true)
         }
         if (alreadyExists) return
 
+        val now = System.currentTimeMillis()
         val sampleStatus = EphemeralStatusItem(
             statusId = UUID.randomUUID().toString(),
             authorAlias = contact.alias,
@@ -1603,11 +1664,12 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             isOwnStatus = false,
             mediaType = StatusMediaType.TEXT_CARD,
             captionText = "Tor v3 Hidden Service online • Hybrid ML-KEM-1024 + X25519 ratchet ready in RAM.",
-            backgroundHex = "#0D2E22",
-            createdAtEpochMillis = System.currentTimeMillis(),
-            expiresOnSessionClose = true,
+            backgroundHex = "#00A859",
+            createdAtEpochMillis = now,
+            expiresOnSessionClose = false,
             privacyPolicy = StatusPrivacyPolicy.ALL_VERIFIED_CONTACTS,
-            viewedByLocalUser = false
+            viewedByLocalUser = false,
+            expiresAtEpochMillis = now + STATUS_TTL_24H_MS
         )
         _uiState.update { state ->
             state.copy(ephemeralStatuses = listOf(sampleStatus) + state.ephemeralStatuses)
@@ -1617,37 +1679,182 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
     fun publishOwnEphemeralStatus(
         caption: String,
         mediaType: StatusMediaType = StatusMediaType.TEXT_CARD,
-        backgroundHex: String = "#0A2E24"
+        backgroundHex: String = "#00A859",
+        mediaUri: Uri? = null,
+        selectedPeerOnions: Set<String>? = null
     ) {
         val trimmed = caption.trim()
-        if (trimmed.isEmpty()) return
+        if (trimmed.isEmpty() && mediaUri == null) return
         val mySummary = _uiState.value.identitySummary
         val myOnion = mySummary?.onionAddress ?: "local-identity.onion"
+        val policy = _uiState.value.statusPrivacyPolicy
 
-        val payloadBytes = if (mediaType == StatusMediaType.IMAGE_CARD) {
-            "ZT2-STATUS-IMAGE-PAYLOAD-${System.nanoTime()}".toByteArray(StandardCharsets.UTF_8)
-        } else null
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val loadedMedia = if (mediaUri != null && mediaType != StatusMediaType.TEXT_CARD) {
+                    val kind = if (mediaType == StatusMediaType.VIDEO_CARD) {
+                        MessagePayloadKind.VIDEO
+                    } else {
+                        MessagePayloadKind.IMAGE
+                    }
+                    MediaRamLoader.loadUriToRam(appContext, mediaUri, kind)
+                } else null
 
-        val newItem = EphemeralStatusItem(
-            statusId = UUID.randomUUID().toString(),
-            authorAlias = "My Status (Live RAM)",
-            authorOnion = myOnion,
-            isOwnStatus = true,
-            mediaType = mediaType,
-            captionText = trimmed,
-            backgroundHex = backgroundHex,
-            createdAtEpochMillis = System.currentTimeMillis(),
-            expiresOnSessionClose = true,
-            privacyPolicy = _uiState.value.statusPrivacyPolicy,
-            encryptedPayloadBytes = payloadBytes,
-            viewedByLocalUser = true
-        )
+                val now = System.currentTimeMillis()
+                val newItem = EphemeralStatusItem(
+                    statusId = UUID.randomUUID().toString(),
+                    authorAlias = "My Status",
+                    authorOnion = myOnion,
+                    isOwnStatus = true,
+                    mediaType = mediaType,
+                    captionText = trimmed.ifEmpty {
+                        when (mediaType) {
+                            StatusMediaType.VIDEO_CARD -> "Encrypted Video Status (24h)"
+                            StatusMediaType.IMAGE_CARD -> "Encrypted Photo Status (24h)"
+                            else -> ""
+                        }
+                    },
+                    backgroundHex = backgroundHex,
+                    createdAtEpochMillis = now,
+                    expiresOnSessionClose = false,
+                    privacyPolicy = policy,
+                    encryptedPayloadBytes = loadedMedia?.payloadBytes,
+                    viewedByLocalUser = true,
+                    expiresAtEpochMillis = now + STATUS_TTL_24H_MS,
+                    mimeType = loadedMedia?.mimeType,
+                    sanitizedFileName = loadedMedia?.fileName
+                )
 
-        _uiState.update { state ->
-            state.copy(
-                ephemeralStatuses = listOf(newItem) + state.ephemeralStatuses,
-                statusBannerMessage = "Ephemeral P2P status stored in volatile RAM for verified connected peers."
+                _uiState.update { state ->
+                    state.copy(
+                        ephemeralStatuses = listOf(newItem) + state.ephemeralStatuses,
+                        statusBannerMessage = isHi(
+                            "स्टेटस 24 घंटे के लिए RAM में सहेजा गया — सत्यापित पीयर्स को भेजा जा रहा है…",
+                            "Status saved in RAM (auto-deletes in 24h) — syncing encrypted to peers…"
+                        )
+                    )
+                }
+
+                val targets = if (policy == StatusPrivacyPolicy.SELECTED_PEERS_ONLY && !selectedPeerOnions.isNullOrEmpty()) {
+                    selectedPeerOnions
+                } else {
+                    null
+                }
+                val deliveredCount = TorOnionTransportManager.broadcastStatusItem(newItem, targets)
+                _uiState.update { state ->
+                    state.copy(
+                        statusBannerMessage = if (deliveredCount > 0) {
+                            isHi(
+                                "E2EE स्टेटस $deliveredCount कनेक्टेड पीयर को भेजा गया (24h में स्वतः डिलीट)।",
+                                "E2EE status delivered to $deliveredCount connected peer(s) • Auto-deletes in 24h."
+                            )
+                        } else {
+                            isHi(
+                                "स्टेटस तैयार (24h) • पीयर के ऑनलाइन/कनेक्ट होते ही स्वतः सिंक होगा।",
+                                "Status live (24h auto-delete) • Will deliver automatically when verified peer connects."
+                            )
+                        }
+                    )
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(errorBannerMessage = "Could not publish status media: ${e.message}")
+                }
+            }
+        }
+    }
+
+    fun saveMessageMediaToGallery(message: RichConversationMessage) {
+        val transfer = message.fileTransfer ?: return
+        val bytes = transfer.decryptedInMemoryBytes
+        if (bytes == null || bytes.isEmpty()) {
+            _uiState.update {
+                it.copy(errorBannerMessage = "Decrypted payload was already zeroized from RAM.")
+            }
+            return
+        }
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val res = MediaExportAndOpenHelper.saveDecryptedMediaToDevice(
+                context = appContext,
+                fileName = transfer.manifest.sanitizedFileName,
+                mimeType = transfer.manifest.mimeType,
+                kind = message.payloadKind,
+                bytes = bytes
             )
+            res.fold(
+                onSuccess = { savedPath ->
+                    _uiState.update {
+                        it.copy(
+                            statusBannerMessage = isHi(
+                                "गैलरी/डाउनलोड में सहेजा गया: $savedPath",
+                                "Saved to device Gallery/Downloads: $savedPath"
+                            )
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(errorBannerMessage = "Could not save media: ${err.message}")
+                    }
+                }
+            )
+        }
+    }
+
+    fun saveStatusMediaToGallery(status: EphemeralStatusItem) {
+        val bytes = status.encryptedPayloadBytes
+        if (bytes == null || bytes.isEmpty()) {
+            _uiState.update { it.copy(errorBannerMessage = "No downloadable photo/video payload in this status.") }
+            return
+        }
+        val kind = if (status.mediaType == StatusMediaType.VIDEO_CARD) MessagePayloadKind.VIDEO else MessagePayloadKind.IMAGE
+        val name = status.sanitizedFileName ?: if (kind == MessagePayloadKind.VIDEO) {
+            "status_${status.statusId.take(6)}.mp4"
+        } else {
+            "status_${status.statusId.take(6)}.jpg"
+        }
+        val mime = status.mimeType ?: if (kind == MessagePayloadKind.VIDEO) "video/mp4" else "image/jpeg"
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val res = MediaExportAndOpenHelper.saveDecryptedMediaToDevice(
+                context = appContext,
+                fileName = name,
+                mimeType = mime,
+                kind = kind,
+                bytes = bytes
+            )
+            res.fold(
+                onSuccess = { savedPath ->
+                    _uiState.update {
+                        it.copy(statusBannerMessage = "Saved status media to Gallery: $savedPath")
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(errorBannerMessage = "Could not save status media: ${err.message}")
+                    }
+                }
+            )
+        }
+    }
+
+    fun openMessageMediaExternally(message: RichConversationMessage) {
+        val transfer = message.fileTransfer ?: return
+        val bytes = transfer.decryptedInMemoryBytes
+        if (bytes == null || bytes.isEmpty()) {
+            _uiState.update { it.copy(errorBannerMessage = "Decrypted file is no longer in RAM.") }
+            return
+        }
+        val res = MediaExportAndOpenHelper.openDecryptedFileExternally(
+            context = appContext,
+            fileName = transfer.manifest.sanitizedFileName,
+            mimeType = transfer.manifest.mimeType,
+            kind = message.payloadKind,
+            bytes = bytes
+        )
+        res.onFailure { err ->
+            _uiState.update {
+                it.copy(errorBannerMessage = "No viewer app available or cannot open: ${err.message}")
+            }
         }
     }
 
@@ -1974,10 +2181,15 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private suspend fun runCallTimerAndTelemetryLoop(callId: String) {
+        var ticks = 0
         while (_uiState.value.activeCallState?.callId == callId &&
             _uiState.value.activeCallState?.protocolState == CallProtocolState.CONNECTED_ENCRYPTED_TOR_STREAM
         ) {
             delay(1_000L)
+            ticks++
+            if (ticks <= 3 || ticks % 5 == 0) {
+                EncryptedCallMediaEngine.resyncControlState()
+            }
             _uiState.update { state ->
                 val current = state.activeCallState ?: return@update state
                 if (current.callId != callId) return@update state
@@ -2105,6 +2317,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         pendingCallPrivKey32 = null
         processedVolatileMsgKeys.clear()
         wipeAllRichMessagesInRam()
+        MediaExportAndOpenHelper.shredAllEphemeralOpenCache(appContext)
         _uiState.value.ephemeralStatuses.forEach { it.wipeFromRam() }
         val wipedCount = TorOnionTransportManager.emergencyDisconnectAndWipe()
         SessionService.stopServiceAndWipe(appContext)
@@ -2137,6 +2350,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun wipeAllVolatileCachesAndMediaInRam() {
         wipeAllRichMessagesInRam()
+        MediaExportAndOpenHelper.shredAllEphemeralOpenCache(appContext)
         _uiState.value.ephemeralStatuses.forEach { it.wipeFromRam() }
         SecureWindowManager.scrubClipboardNow(appContext)
         _uiState.update {

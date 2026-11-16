@@ -697,6 +697,67 @@ class ExampleUnitTest {
             server.close()
         }
     }
+
+    @Test
+    fun ephemeralStatusItem_24hExpiryAndVideoCardBehavior() {
+        val now = 1_700_000_000_000L
+        val status = com.zerotrace.bridge.EphemeralStatusItem(
+            statusId = "st-24h-1",
+            authorAlias = "Alice",
+            authorOnion = "aliceonionaddressv3.onion",
+            isOwnStatus = true,
+            mediaType = com.zerotrace.bridge.StatusMediaType.VIDEO_CARD,
+            captionText = "Encrypted video update",
+            backgroundHex = "#00B86B",
+            createdAtEpochMillis = now,
+            mimeType = "video/mp4",
+            sanitizedFileName = "clip.mp4"
+        )
+
+        assertEquals(now + com.zerotrace.bridge.STATUS_TTL_24H_MS, status.expiresAtEpochMillis)
+        assertFalse(status.isExpired(now + com.zerotrace.bridge.STATUS_TTL_24H_MS - 1L))
+        assertTrue(status.isExpired(now + com.zerotrace.bridge.STATUS_TTL_24H_MS))
+        assertEquals(com.zerotrace.bridge.StatusMediaType.VIDEO_CARD, status.mediaType)
+    }
+
+    @Test
+    fun yuv420888PlanesToNv21_respectsRowStrideAndInterleavedPixelStride() {
+        // 4x2 frame: yRowStride = 6 (2 padding bytes per row), UV interleaved with pixelStride=2, rowStride=6
+        val width = 4
+        val height = 2
+
+        val yBytes = byteArrayOf(
+            10, 11, 12, 13, 99, 99,
+            20, 21, 22, 23, 88, 88
+        )
+        val uBytes = byteArrayOf(
+            31, 99, 32, 99, 77, 77
+        )
+        val vBytes = byteArrayOf(
+            41, 99, 42, 99, 66, 66
+        )
+
+        val nv21 = com.zerotrace.media.EncryptedCallMediaEngine.yuv420888PlanesToNv21(
+            width = width,
+            height = height,
+            yBuffer = java.nio.ByteBuffer.wrap(yBytes),
+            yRowStride = 6,
+            yPixelStride = 1,
+            uBuffer = java.nio.ByteBuffer.wrap(uBytes),
+            uRowStride = 6,
+            uPixelStride = 2,
+            vBuffer = java.nio.ByteBuffer.wrap(vBytes),
+            vRowStride = 6,
+            vPixelStride = 2
+        )
+
+        val expected = byteArrayOf(
+            10, 11, 12, 13,
+            20, 21, 22, 23,
+            41, 31, 42, 32
+        )
+        assertArrayEquals(expected, nv21)
+    }
 }
 
 

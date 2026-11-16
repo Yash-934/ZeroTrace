@@ -3,6 +3,7 @@ package com.zerotrace.ui.calls
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.util.Size
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -10,12 +11,13 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,6 +27,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -33,6 +36,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.CallMade
 import androidx.compose.material.icons.automirrored.filled.CallMissed
 import androidx.compose.material.icons.automirrored.filled.CallReceived
@@ -51,6 +55,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -77,12 +83,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import java.util.concurrent.Executors
 import com.zerotrace.bridge.ActiveCallUiState
 import com.zerotrace.bridge.CallDirectionFilter
 import com.zerotrace.bridge.CallMediaKind
@@ -93,24 +99,21 @@ import com.zerotrace.network.ConnectivityState
 import com.zerotrace.ui.AppLanguage
 import com.zerotrace.ui.components.ContactAvatar
 import com.zerotrace.ui.components.EmptyState
-import com.zerotrace.ui.components.SecurityInformationCard
 import com.zerotrace.ui.components.VideoCallControls
 import com.zerotrace.ui.components.VoiceCallControls
 import com.zerotrace.ui.components.ZeroTraceTopBar
 import com.zerotrace.ui.theme.AmberWarning
 import com.zerotrace.ui.theme.CrimsonDanger
-import com.zerotrace.ui.theme.CyanAccent
-import com.zerotrace.ui.theme.EmeraldPrimary
 import com.zerotrace.ui.theme.MonospaceStyle
+import com.zerotrace.ui.theme.ZeroTracePalette
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executors
 
 /**
  * Screen 6 of Section 4: Calls Tab
- * Honest Architecture (Section 9):
- * - Standard WebRTC UDP/STUN/TURN is NEVER used because STUN/ICE leaks real IP addresses and Tor only routes TCP streams.
- * - Calls use experimental Tor-TCP chunked AEAD framing (`ChaCha20-Poly1305`) with explicit high-latency disclosure.
+ * Clean Light-mode layout matching Mockup Screen 5 with Tor-TCP E2EE Calling.
  */
 @Composable
 fun ZeroTraceCallsTabScreen(
@@ -142,13 +145,45 @@ fun ZeroTraceCallsTabScreen(
 
     Scaffold(
         topBar = {
-            ZeroTraceTopBar(
-                title = if (isHi) "कॉल (Tor E2EE)" else "Calls",
-                subtitle = "Tor-Routed TCP Encrypted Calling (Experimental)",
-                connectivityState = connectivityState,
-                torProgress = torProgress,
-                onEmergencyWipeClick = onEmergencyWipe
-            )
+            Surface(color = MaterialTheme.colorScheme.surface) {
+                Column {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Call,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = if (isHi) "कॉल" else "Calls",
+                                style = MaterialTheme.typography.titleLarge.copy(fontSize = 21.sp, fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "TOR v3 • ${connectivityState.code}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                }
+            }
         },
         containerColor = MaterialTheme.colorScheme.background
     ) { padding ->
@@ -158,20 +193,10 @@ fun ZeroTraceCallsTabScreen(
                 .padding(padding)
                 .padding(horizontal = 16.dp)
                 .testTag("calls_tab_screen"),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-            contentPadding = PaddingValues(top = 12.dp, bottom = 88.dp)
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+            contentPadding = PaddingValues(top = 10.dp, bottom = 88.dp)
         ) {
-            // Honest Tor Calling Architecture Warning Card (Section 9)
-            item {
-                SecurityInformationCard(
-                    title = "Experimental Tor-TCP Calling (Zero WebRTC/STUN Leaks)",
-                    protocolSuite = "Ephemeral PQXDH Call Key + ChaCha20-Poly1305 Frame Stream",
-                    torRoutingNote = "Tor supports TCP only (no UDP). STUN/TURN/ICE are disabled to prevent clearnet IP leaks.",
-                    storagePolicyNote = "High-latency TCP-over-Tor transport. Volatile call history is stored strictly in RAM."
-                )
-            }
-
-            // Filter Chips + Clear Volatile Call Log
+            // Pill Filter Chips + Clear Volatile Call Log
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -180,10 +205,32 @@ fun ZeroTraceCallsTabScreen(
                 ) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         CallDirectionFilter.entries.forEach { filter ->
+                            val isSelected = selectedFilter == filter
+                            val label = when (filter) {
+                                CallDirectionFilter.ALL -> "All"
+                                CallDirectionFilter.MISSED -> "Missed"
+                                CallDirectionFilter.AUDIO -> "Audio"
+                                CallDirectionFilter.VIDEO -> "Video"
+                            }
                             FilterChip(
-                                selected = selectedFilter == filter,
+                                selected = isSelected,
                                 onClick = { onFilterChange(filter) },
-                                label = { Text(filter.name, style = MaterialTheme.typography.labelSmall) }
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                    selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                    labelColor = MaterialTheme.colorScheme.onSurface
+                                ),
+                                border = null,
+                                shape = RoundedCornerShape(50),
+                                label = {
+                                    Text(
+                                        text = label,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                    )
+                                },
+                                modifier = Modifier.height(34.dp)
                             )
                         }
                     }
@@ -202,15 +249,6 @@ fun ZeroTraceCallsTabScreen(
                 }
             }
 
-            // Verified Peers Quick Dial Section
-            item {
-                Text(
-                    text = "ENCRYPTED PEER DIALER (${verifiedContacts.size})",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = EmeraldPrimary
-                )
-            }
-
             if (verifiedContacts.isEmpty()) {
                 item {
                     EmptyState(
@@ -223,104 +261,99 @@ fun ZeroTraceCallsTabScreen(
                 }
             } else {
                 items(verifiedContacts, key = { "dial_${it.onionAddress}" }) { contact ->
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                        shape = RoundedCornerShape(16.dp),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                modifier = Modifier.weight(1f)
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    ContactAvatar(
-                                        alias = contact.alias,
-                                        onionAddress = contact.onionAddress,
-                                        size = 44.dp
-                                    )
-                                    Spacer(modifier = Modifier.width(12.dp))
-                                    Column {
+                                ContactAvatar(
+                                    alias = contact.alias,
+                                    onionAddress = contact.onionAddress,
+                                    size = 46.dp
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(
                                             text = contact.alias,
-                                            style = MaterialTheme.typography.titleSmall
+                                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = MaterialTheme.colorScheme.onSurface
                                         )
-                                        Text(
-                                            text = "${contact.onionAddress.take(18)}…onion",
-                                            style = MonospaceStyle.copy(fontSize = 10.sp),
-                                            color = CyanAccent
+                                        Spacer(modifier = Modifier.width(5.dp))
+                                        Icon(
+                                            imageVector = Icons.Default.Lock,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(13.dp)
                                         )
                                     }
+                                    Text(
+                                        text = "Encrypted • onion: ${contact.onionAddress.take(14)}…",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 }
+                            }
 
-                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    IconButton(
-                                        onClick = { onStartAudioCall(contact) },
-                                        modifier = Modifier.testTag("start_audio_call_${contact.alias}")
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Call,
-                                            contentDescription = "Start Encrypted Audio Call",
-                                            tint = EmeraldPrimary
-                                        )
-                                    }
-                                    IconButton(
-                                        onClick = { onStartVideoCall(contact) },
-                                        modifier = Modifier.testTag("start_video_call_${contact.alias}")
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Videocam,
-                                            contentDescription = "Start Encrypted Video Call",
-                                            tint = CyanAccent
-                                        )
-                                    }
-                                    IconButton(
-                                        onClick = { onSimulateIncomingCall(contact, CallMediaKind.AUDIO) },
-                                        modifier = Modifier.testTag("simulate_incoming_call_${contact.alias}")
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.RingVolume,
-                                            contentDescription = "Test Incoming Call Ring",
-                                            tint = AmberWarning
-                                        )
-                                    }
+                            Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                IconButton(
+                                    onClick = { onStartAudioCall(contact) },
+                                    modifier = Modifier.testTag("start_audio_call_${contact.alias}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Call,
+                                        contentDescription = "Start Encrypted Audio Call",
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onStartVideoCall(contact) },
+                                    modifier = Modifier.testTag("start_video_call_${contact.alias}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Videocam,
+                                        contentDescription = "Start Encrypted Video Call",
+                                        tint = MaterialTheme.colorScheme.secondary
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onSimulateIncomingCall(contact, CallMediaKind.AUDIO) },
+                                    modifier = Modifier.testTag("simulate_incoming_call_${contact.alias}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.RingVolume,
+                                        contentDescription = "Test Incoming Call Ring",
+                                        tint = MaterialTheme.colorScheme.tertiary
+                                    )
                                 }
                             }
                         }
-                    }
-                }
-            }
-
-            // Volatile RAM Call History Section
-            item {
-                Text(
-                    text = "VOLATILE RAM CALL HISTORY (${filteredHistory.size})",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            if (filteredHistory.isEmpty()) {
-                item {
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = "No volatile call entries in RAM. Call logs are never persisted to SQLite or Android CallLog provider.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(16.dp)
+                        HorizontalDivider(
+                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
+                            modifier = Modifier.padding(start = 58.dp)
                         )
                     }
                 }
-            } else {
+            }
+
+            if (filteredHistory.isNotEmpty()) {
+                item {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "RECENT CALLS (${filteredHistory.size})",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 items(filteredHistory, key = { it.callId }) { entry ->
                     CallHistoryRow(entry = entry)
                 }
@@ -331,46 +364,55 @@ fun ZeroTraceCallsTabScreen(
 
 @Composable
 private fun CallHistoryRow(entry: VolatileCallHistoryEntry) {
-    val formatter = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(14.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
+    val formatter = remember { SimpleDateFormat("hh:mm a", Locale.getDefault()) }
+    Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp),
+                .padding(vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                val icon = when {
-                    entry.wasMissed -> Icons.AutoMirrored.Filled.CallMissed
-                    entry.isIncoming -> Icons.AutoMirrored.Filled.CallReceived
-                    else -> Icons.AutoMirrored.Filled.CallMade
-                }
-                val tint = if (entry.wasMissed) CrimsonDanger else EmeraldPrimary
-                Icon(imageVector = icon, contentDescription = null, tint = tint)
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                ContactAvatar(
+                    alias = entry.peerAlias,
+                    onionAddress = entry.peerOnion,
+                    size = 44.dp
+                )
                 Spacer(modifier = Modifier.width(12.dp))
                 Column {
                     Text(
-                        text = "${entry.peerAlias} (${entry.mediaKind.name})",
-                        style = MaterialTheme.typography.titleSmall
+                        text = entry.peerAlias,
+                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSurface
                     )
-                    Text(
-                        text = "${formatter.format(Date(entry.timestampEpochMillis))} • Duration ${entry.durationSeconds}s • Tor TCP",
-                        style = MonospaceStyle.copy(fontSize = 10.sp),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        val icon = when {
+                            entry.wasMissed -> Icons.AutoMirrored.Filled.CallMissed
+                            entry.isIncoming -> Icons.AutoMirrored.Filled.CallReceived
+                            else -> Icons.AutoMirrored.Filled.CallMade
+                        }
+                        val tint = if (entry.wasMissed) CrimsonDanger else MaterialTheme.colorScheme.primary
+                        Icon(imageVector = icon, contentDescription = null, tint = tint, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "${if (entry.wasMissed) "Missed" else if (entry.isIncoming) "Incoming" else "Outgoing"} • ${formatter.format(Date(entry.timestampEpochMillis))} • Encrypted",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
             Text(
-                text = "RAM-ONLY",
-                style = MonospaceStyle.copy(fontSize = 10.sp),
-                color = CyanAccent
+                text = if (entry.durationSeconds > 0) formatCallDuration(entry.durationSeconds) else "Tor",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+        HorizontalDivider(
+            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
+            modifier = Modifier.padding(start = 56.dp)
+        )
     }
 }
 
@@ -413,11 +455,12 @@ fun ZeroTraceVoiceCallScreen(
                             listOf(Color(0xFF0A241C), Color(0xFF06080C))
                         )
                     )
+                    .navigationBarsPadding()
                     .padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
-                // Top Security & Experimental Tor-TCP Notice
+                // Top Security & Tor-TCP Notice
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Surface(
                         color = AmberWarning.copy(alpha = 0.16f),
@@ -425,7 +468,7 @@ fun ZeroTraceVoiceCallScreen(
                         border = BorderStroke(1.dp, AmberWarning.copy(alpha = 0.6f))
                     ) {
                         Text(
-                            text = "EXPERIMENTAL TOR-TCP VOICE STREAM • NO STUN/UDP LEAKS",
+                            text = "TOR-TCP VOICE STREAM • ZERO STUN/UDP LEAKS",
                             style = MonospaceStyle.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
                             color = AmberWarning,
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
@@ -436,14 +479,14 @@ fun ZeroTraceVoiceCallScreen(
                         Icon(
                             imageVector = Icons.Default.Lock,
                             contentDescription = null,
-                            tint = EmeraldPrimary,
+                            tint = Color(0xFF00E676),
                             modifier = Modifier.size(15.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = "End-to-End Encrypted • Safety: ${callState.peerSafetyDigits.take(19)}",
                             style = MonospaceStyle.copy(fontSize = 11.sp),
-                            color = EmeraldPrimary
+                            color = Color(0xFF00E676)
                         )
                     }
                 }
@@ -466,23 +509,23 @@ fun ZeroTraceVoiceCallScreen(
                     Text(
                         text = callState.peerOnion,
                         style = MonospaceStyle.copy(fontSize = 11.sp),
-                        color = CyanAccent
+                        color = Color(0xFF97F0FF)
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
                         text = when (callState.protocolState) {
-                            CallProtocolState.ROUTING_TOR_CIRCUIT -> "Routing 3-hop Tor Onion Circuit…"
+                            CallProtocolState.ROUTING_TOR_CIRCUIT -> "Routing Tor Onion Circuit…"
                             CallProtocolState.PERFORMING_PQXDH_CALL_AUTH -> "Authenticating ML-KEM-1024 + X25519 Call Key…"
-                            CallProtocolState.RINGING_PEER -> "Ringing Verified Peer over Onion Stream…"
+                            CallProtocolState.RINGING_PEER -> "Ringing Verified Peer…"
                             CallProtocolState.CONNECTED_ENCRYPTED_TOR_STREAM -> formatCallDuration(callState.elapsedSeconds)
                             else -> callState.protocolState.name
                         },
                         style = MonospaceStyle.copy(fontSize = 16.sp, fontWeight = FontWeight.Bold),
-                        color = EmeraldPrimary
+                        color = Color(0xFF00E676)
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Rx Audio: ${callState.remoteAudioPacketsReceived} AEAD frames • ChaCha20-Poly1305 • Ephemeral X25519",
+                        text = "Rx Audio: ${callState.remoteAudioPacketsReceived} AEAD frames • ChaCha20-Poly1305",
                         style = MonospaceStyle.copy(fontSize = 11.sp),
                         color = Color.White.copy(alpha = 0.72f),
                         textAlign = TextAlign.Center
@@ -529,7 +572,9 @@ fun ZeroTraceVoiceCallScreen(
 }
 
 /**
- * Screen 8 of Section 4: Encrypted Video Call Screen
+ * Screen 8 of Section 4: Encrypted Video Call Screen matching Mockup Screen 3
+ * Uses PreviewView.ImplementationMode.COMPATIBLE + explicit YUV_420_888 ImageAnalysis (320x240)
+ * + rounded PiP camera overlay & Tor circuit banner.
  */
 @Composable
 fun ZeroTraceVideoCallScreen(
@@ -570,6 +615,8 @@ fun ZeroTraceVideoCallScreen(
 
     val previewView = remember {
         PreviewView(context).apply {
+            // COMPATIBLE uses TextureView so rounded corner clipping & overlay pills render cleanly without SurfaceView Z-order glitches
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
     }
@@ -577,10 +624,16 @@ fun ZeroTraceVideoCallScreen(
 
     DisposableEffect(Unit) {
         onDispose {
-            try {
-                ProcessCameraProvider.getInstance(context).get().unbindAll()
-            } catch (_: Throwable) {
-            }
+            val providerFuture = ProcessCameraProvider.getInstance(context)
+            providerFuture.addListener(
+                {
+                    try {
+                        providerFuture.get().unbindAll()
+                    } catch (_: Throwable) {
+                    }
+                },
+                ContextCompat.getMainExecutor(context)
+            )
             cameraExecutor.shutdownNow()
         }
     }
@@ -607,7 +660,18 @@ fun ZeroTraceVideoCallScreen(
                         surfaceProvider = previewView.surfaceProvider
                     }
 
+                    val resolutionSelector = ResolutionSelector.Builder()
+                        .setResolutionStrategy(
+                            ResolutionStrategy(
+                                Size(320, 240),
+                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                            )
+                        )
+                        .build()
+
                     val analyzer = ImageAnalysis.Builder()
+                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                        .setResolutionSelector(resolutionSelector)
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build()
                         .apply {
@@ -625,156 +689,255 @@ fun ZeroTraceVideoCallScreen(
     }
 
     Surface(
-        color = Color(0xFF05080B),
+        color = MaterialTheme.colorScheme.background,
         modifier = Modifier
             .fillMaxSize()
             .testTag("video_call_screen")
     ) {
         if (callState == null) {
             Box(contentAlignment = Alignment.Center) {
-                Text("Video call ended.", color = Color.White)
+                Text("Video call ended.", color = MaterialTheme.colorScheme.onBackground)
             }
         } else {
-            Box(modifier = Modifier.fillMaxSize()) {
-                // Remote Peer Live Encrypted Video Surface
-                if (remoteVideoFrame != null && callState.isRemoteCameraEnabled) {
-                    Image(
-                        bitmap = remoteVideoFrame.asImageBitmap(),
-                        contentDescription = "Remote Encrypted Video Feed",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                Brush.radialGradient(
-                                    listOf(Color(0xFF0E2920), Color(0xFF040608))
-                                )
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .navigationBarsPadding()
+            ) {
+                // Clean Light/Theme Top Header matching Mockup Screen 3
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        IconButton(onClick = onEndCall) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "End and Back",
+                                tint = MaterialTheme.colorScheme.onSurface
                             )
-                            .padding(20.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
+                        }
                         ContactAvatar(
                             alias = callState.peerAlias,
                             onionAddress = callState.peerOnion,
-                            size = 96.dp
+                            isOnlineOrSessionActive = callState.protocolState == CallProtocolState.CONNECTED_ENCRYPTED_TOR_STREAM,
+                            size = 40.dp
                         )
-                        Spacer(modifier = Modifier.height(14.dp))
+                        Spacer(modifier = Modifier.width(10.dp))
+                    Column {
                         Text(
-                            text = "${callState.peerAlias} • Encrypted Video over Tor TCP",
-                            style = MaterialTheme.typography.titleLarge,
-                            color = Color.White
+                            text = callState.peerAlias,
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = when (callState.protocolState) {
-                                CallProtocolState.RINGING_PEER -> "Ringing ${callState.peerAlias}…"
-                                CallProtocolState.ROUTING_TOR_CIRCUIT -> "Routing Tor/Onion Stream…"
-                                CallProtocolState.PERFORMING_PQXDH_CALL_AUTH -> "Deriving Ephemeral X25519 Key…"
-                                else -> if (!callState.isRemoteCameraEnabled) {
-                                    "Peer camera paused • ${formatCallDuration(callState.elapsedSeconds)}"
-                                } else {
-                                    "Waiting for remote video frames • ${formatCallDuration(callState.elapsedSeconds)}"
-                                }
-                            },
-                            style = MonospaceStyle.copy(fontSize = 13.sp),
-                            color = EmeraldPrimary
+                            text = "${formatCallDuration(callState.elapsedSeconds)} • TOR Circuit Active • End-to-End Encrypted",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.secondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Prioritized Audio+Video ChaCha20-Poly1305 over Onion TCP (Zero WebRTC UDP/STUN IP leaks)",
-                            style = MonospaceStyle.copy(fontSize = 10.sp),
-                            color = AmberWarning,
-                            textAlign = TextAlign.Center
-                        )
+                    }
                     }
                 }
 
-                // Top-start security & live stream status pill
-                Surface(
-                    color = Color.Black.copy(alpha = 0.62f),
-                    shape = RoundedCornerShape(14.dp),
-                    border = BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.5f)),
+                // Rounded Main Video Stage matching Mockup Screen 3
+                Box(
                     modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(top = 24.dp, start = 16.dp)
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .padding(horizontal = 12.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(Color(0xFF0A1412))
                 ) {
-                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.Lock,
-                                contentDescription = null,
-                                tint = EmeraldPrimary,
-                                modifier = Modifier.size(13.dp)
-                            )
-                            Spacer(modifier = Modifier.width(5.dp))
-                            Text(
-                                text = "${callState.peerAlias} • ${formatCallDuration(callState.elapsedSeconds)}",
-                                style = MonospaceStyle.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
-                                color = Color.White
-                            )
-                        }
-                        Text(
-                            text = "A:${callState.remoteAudioPacketsReceived} V:${callState.remoteVideoFramesReceived} • Safety ${callState.peerSafetyDigits.take(10)}",
-                            style = MonospaceStyle.copy(fontSize = 10.sp),
-                            color = CyanAccent
-                        )
-                    }
-                }
-
-                // Floating Local CameraX Self-Preview Window (Top End)
-                Surface(
-                    color = Color(0xFF101920),
-                    shape = RoundedCornerShape(16.dp),
-                    border = BorderStroke(1.5.dp, EmeraldPrimary),
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(top = 24.dp, end = 16.dp)
-                        .size(width = 118.dp, height = 164.dp)
-                ) {
-                    if (isCameraActive) {
-                        AndroidView(
-                            factory = { previewView },
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .clip(RoundedCornerShape(16.dp))
+                    if (remoteVideoFrame != null && callState.isRemoteCameraEnabled) {
+                        Image(
+                            bitmap = remoteVideoFrame.asImageBitmap(),
+                            contentDescription = "Remote Encrypted Video Feed",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
                         )
                     } else {
                         Column(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .padding(10.dp),
+                                .background(
+                                    Brush.radialGradient(
+                                        listOf(Color(0xFF0E2920), Color(0xFF06080C))
+                                    )
+                                )
+                                .padding(20.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Videocam,
-                                contentDescription = "Local Camera Preview",
-                                tint = if (callState.isCameraEnabled) EmeraldPrimary else CrimsonDanger
+                            ContactAvatar(
+                                alias = callState.peerAlias,
+                                onionAddress = callState.peerOnion,
+                                size = 96.dp
+                            )
+                            Spacer(modifier = Modifier.height(14.dp))
+                            Text(
+                                text = callState.peerAlias,
+                                style = MaterialTheme.typography.titleLarge,
+                                color = Color.White
                             )
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
-                                text = if (!callState.isCameraEnabled) {
-                                    "Camera Off"
-                                } else {
-                                    "Camera Perm\nRequired"
+                                text = when (callState.protocolState) {
+                                    CallProtocolState.RINGING_PEER -> "Ringing ${callState.peerAlias}…"
+                                    CallProtocolState.ROUTING_TOR_CIRCUIT -> "Routing Tor/Onion Stream…"
+                                    CallProtocolState.PERFORMING_PQXDH_CALL_AUTH -> "Deriving Ephemeral X25519 Key…"
+                                    else -> if (!callState.isRemoteCameraEnabled) {
+                                        "Peer camera paused • ${formatCallDuration(callState.elapsedSeconds)}"
+                                    } else {
+                                        "Connecting peer video frames • ${formatCallDuration(callState.elapsedSeconds)}"
+                                    }
                                 },
-                                style = MonospaceStyle.copy(fontSize = 10.sp),
-                                color = Color.White,
-                                textAlign = TextAlign.Center
+                                style = MonospaceStyle.copy(fontSize = 12.sp),
+                                color = Color(0xFF00E676)
                             )
                         }
+                    }
+
+                    // Top-Left Tor Circuit Pill Overlay matching Mockup
+                    Surface(
+                        color = Color.White.copy(alpha = 0.90f),
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "TOR v3 • Circuit Active",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF111827)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF00B86B))
+                            )
+                        }
+                    }
+
+                    // Bottom-Right Floating Self-Preview Window matching Mockup Screen 3
+                    Surface(
+                        color = Color(0xFF101920),
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.5.dp, Color.White.copy(alpha = 0.85f)),
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(12.dp)
+                            .size(width = 102.dp, height = 142.dp)
+                    ) {
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            if (isCameraActive) {
+                                AndroidView(
+                                    factory = { previewView },
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .clip(RoundedCornerShape(14.dp))
+                                )
+                            } else {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(8.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Videocam,
+                                        contentDescription = "Local Camera Preview",
+                                        tint = if (callState.isCameraEnabled) Color(0xFF00E676) else CrimsonDanger
+                                    )
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        text = if (!callState.isCameraEnabled) "Camera Off" else "Camera Perm\nRequired",
+                                        style = MonospaceStyle.copy(fontSize = 9.sp),
+                                        color = Color.White,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+                            Surface(
+                                color = Color.Black.copy(alpha = 0.65f),
+                                shape = RoundedCornerShape(50),
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .padding(bottom = 6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Lock,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(10.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text(
+                                        text = "You • Encrypted",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                                        color = Color.White
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Bottom Mint Call Secured Onion Banner matching Mockup Screen 3
+                Surface(
+                    color = ZeroTracePalette.mintContainer(),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Security,
+                            contentDescription = null,
+                            tint = ZeroTracePalette.mintContent(),
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Call secured • Onion: ${callState.peerOnion.take(22)}…",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Medium,
+                            color = ZeroTracePalette.mintContent(),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
 
                 // Bottom Video Call Controls
                 Box(
                     modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(18.dp)
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    contentAlignment = Alignment.Center
                 ) {
                     VideoCallControls(
                         isMuted = callState.isMuted,
@@ -816,25 +979,26 @@ fun ZeroTraceIncomingCallScreen(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
+                    .navigationBarsPadding()
                     .padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.VerifiedUser, contentDescription = null, tint = EmeraldPrimary)
+                        Icon(Icons.Default.VerifiedUser, contentDescription = null, tint = Color(0xFF00E676))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = "INCOMING AUTHENTICATED TOR ${callState.mediaKind.name} CALL",
                             style = MonospaceStyle.copy(fontSize = 12.sp, fontWeight = FontWeight.Bold),
-                            color = EmeraldPrimary
+                            color = Color(0xFF00E676)
                         )
                     }
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
                         text = "Dual Ed25519 + ML-DSA-87 Caller Signature Verified",
                         style = MonospaceStyle.copy(fontSize = 11.sp),
-                        color = CyanAccent
+                        color = Color(0xFF97F0FF)
                     )
                 }
 
@@ -854,7 +1018,7 @@ fun ZeroTraceIncomingCallScreen(
                     Text(
                         text = callState.peerOnion,
                         style = MonospaceStyle.copy(fontSize = 11.sp),
-                        color = CyanAccent
+                        color = Color(0xFF97F0FF)
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
@@ -894,8 +1058,8 @@ fun ZeroTraceIncomingCallScreen(
                         Button(
                             onClick = onAcceptCall,
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = EmeraldPrimary,
-                                contentColor = Color.Black
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary
                             ),
                             shape = RoundedCornerShape(50),
                             modifier = Modifier
@@ -913,9 +1077,9 @@ fun ZeroTraceIncomingCallScreen(
                         onClick = onQuickMessageReply,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null)
+                        Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null, tint = Color.White)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Decline & Reply in Encrypted Chat")
+                        Text("Decline & Reply in Encrypted Chat", color = Color.White)
                     }
                 }
             }

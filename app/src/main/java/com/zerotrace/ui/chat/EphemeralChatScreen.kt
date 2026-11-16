@@ -5,6 +5,8 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.widget.MediaController
+import android.widget.VideoView
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -15,12 +17,10 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -40,19 +40,24 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
@@ -63,9 +68,11 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SmallFloatingActionButton
@@ -73,6 +80,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -93,11 +101,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.zerotrace.bridge.MessagePayloadKind
 import com.zerotrace.bridge.RichConversationMessage
 import com.zerotrace.bridge.SessionRatchetMetrics
 import com.zerotrace.bridge.VerifiedContactRecord
+import com.zerotrace.media.MediaExportAndOpenHelper
 import com.zerotrace.network.ConnectivityState
 import com.zerotrace.ui.AppLanguage
 import com.zerotrace.ui.components.AttachmentPicker
@@ -105,23 +115,15 @@ import com.zerotrace.ui.components.ContactAvatar
 import com.zerotrace.ui.components.MessageBubble
 import com.zerotrace.ui.components.MessageComposer
 import com.zerotrace.ui.components.ZeroTraceTopBar
-import com.zerotrace.ui.theme.AmberWarning
 import com.zerotrace.ui.theme.ChatWallpaperStyle
 import com.zerotrace.ui.theme.CrimsonDanger
-import com.zerotrace.ui.theme.CyanAccent
-import com.zerotrace.ui.theme.EmeraldPrimary
 import com.zerotrace.ui.theme.MonospaceStyle
+import com.zerotrace.ui.theme.ZeroTracePalette
 import java.nio.charset.StandardCharsets
 import kotlinx.coroutines.launch
 
 /**
  * WhatsApp-Style Chat Conversation Screen (Screen 2 of Section 4)
- * Features:
- * - Top bar with Back button, Contact Avatar, Verified Badge, Tor & Ratchet status, Voice Call, Video Call, Search, More menu
- * - Top E2EE security banner with tap-to-verify fingerprints
- * - Rich MessageBubbles with replies, reactions, voice notes, and chunked ChaCha20-Poly1305 file transfers
- * - Collapsible AttachmentPicker & MessageComposer
- * - Leaving or pressing Wipe immediately zeroizes the volatile chat buffer in RAM
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -150,6 +152,8 @@ fun EphemeralChatScreen(
     onDeleteMessageFromRam: (RichConversationMessage) -> Unit,
     onInspectMessageInfo: (RichConversationMessage?) -> Unit,
     onOpenMediaPreview: (RichConversationMessage) -> Unit,
+    onSaveMediaToGallery: (RichConversationMessage) -> Unit = {},
+    onOpenMediaExternally: (RichConversationMessage) -> Unit = {},
     onShowAttachmentSheet: (Boolean) -> Unit,
     onToggleVoiceRecording: () -> Unit,
     onCancelVoiceRecording: () -> Unit = {},
@@ -298,163 +302,159 @@ fun EphemeralChatScreen(
         )
     }
 
-    val wallpaperColor = when (wallpaperStyle) {
-        ChatWallpaperStyle.OBSIDIAN_GRID -> MaterialTheme.colorScheme.background
-        ChatWallpaperStyle.DEEP_EMERALD_MESH -> Color(0xFF061510)
-        ChatWallpaperStyle.PURE_BLACK_AMOLED -> Color(0xFF000000)
-    }
+    val wallpaperColor = ZeroTracePalette.chatWallpaper(wallpaperStyle)
 
     Scaffold(
         topBar = {
             Surface(
                 color = MaterialTheme.colorScheme.surface,
-                tonalElevation = 4.dp
+                tonalElevation = if (ZeroTracePalette.isLight()) 0.dp else 4.dp
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
+                Column {
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
-                            .weight(1f)
-                            .clickable { onOpenContactProfile() }
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        IconButton(
-                            onClick = onBackToChats,
-                            modifier = Modifier.testTag("chat_back_wipe_button")
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { onOpenContactProfile() }
                         ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Back to Chats"
-                            )
-                        }
-                        ContactAvatar(
-                            alias = peerContact?.alias ?: "Peer",
-                            onionAddress = peerContact?.onionAddress ?: "peer.onion",
-                            isOnlineOrSessionActive = isSessionLive,
-                            size = 40.dp
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    text = peerContact?.alias ?: "Verified Peer",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Spacer(modifier = Modifier.width(5.dp))
-                                Icon(
-                                    imageVector = Icons.Default.VerifiedUser,
-                                    contentDescription = "Verified",
-                                    tint = EmeraldPrimary,
-                                    modifier = Modifier.size(15.dp)
-                                )
-                            }
-                            Text(
-                                text = when {
-                                    isSessionLive ->
-                                        "P2P E2EE Live • Epoch ${ratchetMetrics?.ratchetEpoch ?: 1} • Braids ${ratchetMetrics?.pqBraidStepsCompleted ?: 0}"
-                                    else ->
-                                        "Connecting Tor .onion / P2P… (Tap Reconnect)"
-                                },
-                                style = MonospaceStyle.copy(fontSize = 10.sp),
-                                color = if (isSessionLive) EmeraldPrimary else AmberWarning,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = if (!isSessionLive) {
-                                    Modifier.clickable { onReconnectPeer() }
-                                } else {
-                                    Modifier
-                                }
-                            )
-                        }
-                    }
-
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(
-                            onClick = onStartVoiceCall,
-                            modifier = Modifier.testTag("chat_voice_call_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Call,
-                                contentDescription = "Encrypted Voice Call over Tor",
-                                tint = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                        IconButton(
-                            onClick = onStartVideoCall,
-                            modifier = Modifier.testTag("chat_video_call_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Videocam,
-                                contentDescription = "Encrypted Video Call over Tor",
-                                tint = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                        IconButton(
-                            onClick = onTriggerPqBraidStep,
-                            modifier = Modifier.testTag("chat_pq_rekey_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Autorenew,
-                                contentDescription = "Manual ML-KEM-1024 Braid Step",
-                                tint = CyanAccent
-                            )
-                        }
-                        Box {
                             IconButton(
-                                onClick = { moreMenuExpanded = true },
-                                modifier = Modifier.testTag("chat_more_menu_button")
+                                onClick = onBackToChats,
+                                modifier = Modifier.testTag("chat_back_wipe_button")
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.MoreVert,
-                                    contentDescription = "Conversation Menu"
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "Back to Chats"
                                 )
                             }
-                            DropdownMenu(
-                                expanded = moreMenuExpanded,
-                                onDismissRequest = { moreMenuExpanded = false }
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text("View Contact Profile & Safety Numbers") },
-                                    leadingIcon = { Icon(Icons.Default.VerifiedUser, contentDescription = null) },
-                                    onClick = {
-                                        moreMenuExpanded = false
-                                        onOpenContactProfile()
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Search in Volatile Conversation") },
-                                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                                    onClick = {
-                                        moreMenuExpanded = false
-                                        searchVisible = !searchVisible
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Advance ML-KEM-1024 Braid Ratchet") },
-                                    leadingIcon = { Icon(Icons.Default.Autorenew, contentDescription = null, tint = CyanAccent) },
-                                    onClick = {
-                                        moreMenuExpanded = false
-                                        onTriggerPqBraidStep()
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Destroy Session & Wipe RAM", color = CrimsonDanger, fontWeight = FontWeight.Bold) },
-                                    leadingIcon = { Icon(Icons.Default.LinkOff, contentDescription = null, tint = CrimsonDanger) },
-                                    onClick = {
-                                        moreMenuExpanded = false
-                                        onDisconnectAndWipeSession()
+                            ContactAvatar(
+                                alias = peerContact?.alias ?: "Peer",
+                                onionAddress = peerContact?.onionAddress ?: "peer.onion",
+                                isOnlineOrSessionActive = isSessionLive,
+                                size = 40.dp
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = peerContact?.alias ?: "Verified Peer",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(modifier = Modifier.width(5.dp))
+                                    Icon(
+                                        imageVector = Icons.Default.VerifiedUser,
+                                        contentDescription = "Verified",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                }
+                                Text(
+                                    text = when {
+                                        isSessionLive ->
+                                            "Online • TOR v3 • E2E Encrypted"
+                                        else ->
+                                            "Connecting Tor .onion… (Tap Reconnect)"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                                    color = if (isSessionLive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = if (!isSessionLive) {
+                                        Modifier.clickable { onReconnectPeer() }
+                                    } else {
+                                        Modifier
                                     }
                                 )
                             }
                         }
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(
+                                onClick = onStartVoiceCall,
+                                modifier = Modifier.testTag("chat_voice_call_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Call,
+                                    contentDescription = "Encrypted Voice Call over Tor",
+                                    tint = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            IconButton(
+                                onClick = onStartVideoCall,
+                                modifier = Modifier.testTag("chat_video_call_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Videocam,
+                                    contentDescription = "Encrypted Video Call over Tor",
+                                    tint = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            Box {
+                                IconButton(
+                                    onClick = { moreMenuExpanded = true },
+                                    modifier = Modifier.testTag("chat_more_menu_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.MoreVert,
+                                        contentDescription = "Conversation Menu"
+                                    )
+                                }
+                                DropdownMenu(
+                                    expanded = moreMenuExpanded,
+                                    onDismissRequest = { moreMenuExpanded = false }
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("View Contact Profile & Safety Numbers") },
+                                        leadingIcon = { Icon(Icons.Default.VerifiedUser, contentDescription = null) },
+                                        onClick = {
+                                            moreMenuExpanded = false
+                                            onOpenContactProfile()
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Search in Volatile Conversation") },
+                                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                                        onClick = {
+                                            moreMenuExpanded = false
+                                            searchVisible = !searchVisible
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Advance ML-KEM-1024 Braid Ratchet") },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Default.Autorenew,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.secondary
+                                            )
+                                        },
+                                        modifier = Modifier.testTag("chat_pq_rekey_button"),
+                                        onClick = {
+                                            moreMenuExpanded = false
+                                            onTriggerPqBraidStep()
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Destroy Session & Wipe RAM", color = CrimsonDanger, fontWeight = FontWeight.Bold) },
+                                        leadingIcon = { Icon(Icons.Default.LinkOff, contentDescription = null, tint = CrimsonDanger) },
+                                        onClick = {
+                                            moreMenuExpanded = false
+                                            onDisconnectAndWipeSession()
+                                        }
+                                    )
+                                }
+                            }
+                        }
                     }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
                 }
             }
         },
@@ -526,7 +526,7 @@ fun EphemeralChatScreen(
                         statusBanner.contains("कट", ignoreCase = true)
                     )
                 Surface(
-                    color = AmberWarning.copy(alpha = 0.16f),
+                    color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.14f),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Row(
@@ -539,12 +539,12 @@ fun EphemeralChatScreen(
                         Text(
                             text = statusBanner,
                             style = MaterialTheme.typography.labelSmall,
-                            color = AmberWarning,
+                            color = MaterialTheme.colorScheme.tertiary,
                             modifier = Modifier.weight(1f)
                         )
                         if (showReconnectAction) {
                             TextButton(onClick = onReconnectPeer) {
-                                Text("Reconnect", color = EmeraldPrimary, fontWeight = FontWeight.Bold)
+                                Text("Reconnect", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -565,46 +565,42 @@ fun EphemeralChatScreen(
                         .testTag("chat_message_list"),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    // WhatsApp-style E2EE Notice Banner at top of conversation
+                    // Compact E2EE Notice Banner matching Mockup Screen 2
                     item {
-                        Surface(
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f),
-                            shape = RoundedCornerShape(12.dp),
-                            border = BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.35f)),
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(vertical = 6.dp)
-                                .clickable { showSecuritySheet = true }
-                                .testTag("chat_security_notice_banner")
+                                .padding(vertical = 4.dp),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Column(
-                                modifier = Modifier.padding(12.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
+                            Surface(
+                                color = ZeroTracePalette.mintContainer(),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier
+                                    .clickable { showSecuritySheet = true }
+                                    .testTag("chat_security_notice_banner")
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
                                     Icon(
                                         imageVector = Icons.Default.Lock,
                                         contentDescription = null,
-                                        tint = EmeraldPrimary,
-                                        modifier = Modifier.size(14.dp)
+                                        tint = ZeroTracePalette.mintContent(),
+                                        modifier = Modifier.size(13.dp)
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
                                         text = if (isHi) {
                                             "पोस्ट-क्वांटम हाइब्रिड E2EE • केवल RAM सत्र"
                                         } else {
-                                            "HYBRID PQ DOUBLE RATCHET • VOLATILE RAM ONLY"
+                                            "Post-Quantum E2EE over Tor v3 • RAM Only • Tap to verify"
                                         },
-                                        style = MonospaceStyle.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
-                                        color = EmeraldPrimary
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = ZeroTracePalette.mintContent()
                                     )
                                 }
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = "Messages and attachments are encrypted with X25519 + ML-KEM-1024 + ChaCha20-Poly1305 over Tor v3 Onion streams. Nothing is written to SQLite or disk. Tap to inspect safety numbers.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
                             }
                         }
                     }
@@ -614,7 +610,7 @@ fun EphemeralChatScreen(
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(vertical = 4.dp),
+                                .padding(vertical = 2.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Surface(
@@ -622,9 +618,9 @@ fun EphemeralChatScreen(
                                 shape = RoundedCornerShape(50)
                             ) {
                                 Text(
-                                    text = "TODAY • SESSION ${ratchetMetrics?.sessionIdHex?.take(8) ?: "LIVE"} • Tx:${ratchetMetrics?.sendCount ?: 0} Rx:${ratchetMetrics?.recvCount ?: 0}",
-                                    style = MonospaceStyle.copy(fontSize = 10.sp),
-                                    color = CyanAccent,
+                                    text = "TODAY • EPOCH ${ratchetMetrics?.ratchetEpoch ?: 1} • Tx:${ratchetMetrics?.sendCount ?: 0} Rx:${ratchetMetrics?.recvCount ?: 0}",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
                                 )
                             }
@@ -640,6 +636,8 @@ fun EphemeralChatScreen(
                             onDeleteFromRamClick = { onDeleteMessageFromRam(it) },
                             onInspectInfoClick = { onInspectMessageInfo(it) },
                             onMediaPreviewClick = { onOpenMediaPreview(it) },
+                            onSaveMediaClick = { onSaveMediaToGallery(it) },
+                            onOpenExternallyClick = { onOpenMediaExternally(it) },
                             onVoicePlayToggle = onToggleVoicePlay
                         )
                     }
@@ -657,7 +655,7 @@ fun EphemeralChatScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (unseenIncomingCount > 0) {
                             Surface(
-                                color = EmeraldPrimary,
+                                color = MaterialTheme.colorScheme.primary,
                                 shape = CircleShape,
                                 shadowElevation = 4.dp,
                                 modifier = Modifier.padding(end = 6.dp)
@@ -665,7 +663,7 @@ fun EphemeralChatScreen(
                                 Text(
                                     text = "$unseenIncomingCount",
                                     style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                    color = Color.Black,
+                                    color = MaterialTheme.colorScheme.onPrimary,
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                                 )
                             }
@@ -678,8 +676,8 @@ fun EphemeralChatScreen(
                                     listState.animateScrollToItem(lastIdx)
                                 }
                             },
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                            contentColor = EmeraldPrimary,
+                            containerColor = MaterialTheme.colorScheme.surface,
+                            contentColor = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.testTag("scroll_to_bottom_pill")
                         ) {
                             Icon(
@@ -789,7 +787,7 @@ private fun MessageCryptographicInfoDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        icon = { Icon(Icons.Default.Info, contentDescription = null, tint = EmeraldPrimary) },
+        icon = { Icon(Icons.Default.Info, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
         title = { Text("Cryptographic Message Telemetry") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -810,7 +808,7 @@ private fun MessageCryptographicInfoDialog(
                             "AEAD Chunks: ${transfer.manifest.totalChunks} (${transfer.manifest.totalSizeBytes} bytes)\n" +
                             "SHA-256 Digest: ${transfer.manifest.sha256DigestHex}",
                         style = MonospaceStyle.copy(fontSize = 10.sp),
-                        color = CyanAccent
+                        color = MaterialTheme.colorScheme.secondary
                     )
                 }
             }
@@ -832,14 +830,14 @@ private fun ChatSessionSecurityDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        icon = { Icon(Icons.Default.Security, contentDescription = null, tint = EmeraldPrimary) },
+        icon = { Icon(Icons.Default.Security, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
         title = { Text("Verified Post-Quantum Session") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
                     text = "Peer: ${contact.alias}\nOnion: ${contact.onionAddress}",
                     style = MonospaceStyle.copy(fontSize = 11.sp),
-                    color = CyanAccent
+                    color = MaterialTheme.colorScheme.secondary
                 )
                 Text(
                     text = "Classical Safety Digits:\n${contact.classicalSafetyDigits}",
@@ -848,7 +846,7 @@ private fun ChatSessionSecurityDialog(
                 Text(
                     text = "Post-Quantum Safety Digits (ML-DSA-87 / ML-KEM-1024):\n${contact.pqSafetyDigits}",
                     style = MonospaceStyle.copy(fontSize = 11.sp),
-                    color = EmeraldPrimary
+                    color = MaterialTheme.colorScheme.primary
                 )
                 Text(
                     text = "Ratchet Epoch: ${metrics?.ratchetEpoch ?: 1} • PQ Braids: ${metrics?.pqBraidStepsCompleted ?: 0}",
@@ -870,25 +868,31 @@ private fun ChatSessionSecurityDialog(
 }
 
 /**
- * Screen 12 of Section 4: Encrypted Media / Attachment Preview Screen
- * Inspects a decrypted attachment strictly in volatile RAM with SHA-256 integrity proof.
+ * Screen 12 of Section 4: Encrypted Media / Attachment Preview & Export Screen
+ * Supports inline Image, inline VideoView playback (shredding temp cache on dispose),
+ * Document preview + FileProvider external open, Audio playback, and scoped MediaStore Save to Gallery.
  */
 @Composable
 fun EncryptedMediaPreviewScreen(
     message: RichConversationMessage?,
     connectivityState: ConnectivityState,
     torProgress: Int,
+    playingVoiceMessageId: String? = null,
+    onToggleVoicePlay: (RichConversationMessage) -> Unit = {},
+    onSaveToGallery: (RichConversationMessage) -> Unit = {},
+    onOpenExternally: (RichConversationMessage) -> Unit = {},
     onBack: () -> Unit,
     onWipeFromRamAndClose: (RichConversationMessage) -> Unit
 ) {
     BackHandler(onBack = onBack)
+    val context = LocalContext.current
     val transfer = message?.fileTransfer
 
     Scaffold(
         topBar = {
             ZeroTraceTopBar(
                 title = transfer?.manifest?.sanitizedFileName ?: "Encrypted Attachment Preview",
-                subtitle = "RAM-Only Decrypted Buffer • Zero Temp Files",
+                subtitle = "RAM-Only Decrypted Buffer • Open or Save",
                 connectivityState = connectivityState,
                 torProgress = torProgress,
                 onBackClick = onBack
@@ -900,23 +904,24 @@ fun EncryptedMediaPreviewScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .navigationBarsPadding()
                 .padding(16.dp)
                 .testTag("media_preview_screen"),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             if (message == null || transfer == null) {
                 Text("No encrypted attachment selected.")
             } else {
+                val decryptedBytes = transfer.decryptedInMemoryBytes
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                     shape = RoundedCornerShape(20.dp),
-                    border = BorderStroke(1.dp, CyanAccent.copy(alpha = 0.5f)),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
                 ) {
-                    val decryptedBytes = transfer.decryptedInMemoryBytes
                     val previewBitmap = if (message.payloadKind == MessagePayloadKind.IMAGE && decryptedBytes != null) {
                         remember(transfer.manifest.transferId, decryptedBytes.size) {
                             try {
@@ -929,76 +934,226 @@ fun EncryptedMediaPreviewScreen(
                         null
                     }
 
+                    val tempVideoFile = if (message.payloadKind == MessagePayloadKind.VIDEO && decryptedBytes != null) {
+                        remember(transfer.manifest.transferId, decryptedBytes.size) {
+                            MediaExportAndOpenHelper.prepareTempCacheFile(
+                                context = context,
+                                fileName = transfer.manifest.sanitizedFileName,
+                                bytes = decryptedBytes
+                            )
+                        }
+                    } else {
+                        null
+                    }
+
+                    DisposableEffect(tempVideoFile) {
+                        onDispose {
+                            MediaExportAndOpenHelper.shredTempCacheFile(tempVideoFile)
+                        }
+                    }
+
+                    val textDocumentPreview = remember(transfer.manifest.transferId, decryptedBytes?.size) {
+                        if (message.payloadKind == MessagePayloadKind.DOCUMENT &&
+                            decryptedBytes != null &&
+                            (transfer.manifest.mimeType.startsWith("text/") ||
+                                transfer.manifest.sanitizedFileName.endsWith(".txt", true) ||
+                                transfer.manifest.sanitizedFileName.endsWith(".md", true) ||
+                                transfer.manifest.sanitizedFileName.endsWith(".json", true) ||
+                                transfer.manifest.sanitizedFileName.endsWith(".csv", true))
+                        ) {
+                            try {
+                                String(decryptedBytes, 0, minOf(decryptedBytes.size, 8192), StandardCharsets.UTF_8)
+                            } catch (_: Throwable) {
+                                null
+                            }
+                        } else {
+                            null
+                        }
+                    }
+
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
                             .verticalScroll(rememberScrollState())
-                            .padding(20.dp),
+                            .padding(18.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
-                        if (previewBitmap != null) {
-                            Image(
-                                bitmap = previewBitmap,
-                                contentDescription = transfer.manifest.sanitizedFileName,
-                                contentScale = ContentScale.Fit,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(340.dp)
-                                    .clip(RoundedCornerShape(14.dp))
-                            )
-                            Spacer(modifier = Modifier.height(16.dp))
-                        } else {
-                            Icon(
-                                imageVector = if (message.payloadKind == MessagePayloadKind.IMAGE) {
-                                    Icons.Default.Image
-                                } else {
-                                    Icons.Default.Description
-                                },
-                                contentDescription = null,
-                                tint = EmeraldPrimary,
-                                modifier = Modifier.size(72.dp)
-                            )
-                            Spacer(modifier = Modifier.height(16.dp))
+                        when {
+                            previewBitmap != null -> {
+                                Image(
+                                    bitmap = previewBitmap,
+                                    contentDescription = transfer.manifest.sanitizedFileName,
+                                    contentScale = ContentScale.Fit,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(340.dp)
+                                        .clip(RoundedCornerShape(14.dp))
+                                )
+                                Spacer(modifier = Modifier.height(14.dp))
+                            }
+
+                            tempVideoFile != null -> {
+                                val videoUri = remember(tempVideoFile) {
+                                    MediaExportAndOpenHelper.getShareableUri(context, tempVideoFile)
+                                }
+                                AndroidView(
+                                    factory = { ctx ->
+                                        VideoView(ctx).apply {
+                                            val controller = MediaController(ctx)
+                                            controller.setAnchorView(this)
+                                            setMediaController(controller)
+                                            setVideoURI(videoUri)
+                                            setOnPreparedListener { mp ->
+                                                mp.isLooping = true
+                                                start()
+                                            }
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(320.dp)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(Color.Black)
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
+                                OutlinedButton(onClick = { onOpenExternally(message) }) {
+                                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Open Video in System Player")
+                                }
+                                Spacer(modifier = Modifier.height(12.dp))
+                            }
+
+                            message.payloadKind == MessagePayloadKind.AUDIO_FILE ||
+                                message.payloadKind == MessagePayloadKind.VOICE_NOTE -> {
+                                val isPlaying = playingVoiceMessageId == message.id
+                                Icon(
+                                    imageVector = Icons.Default.AudioFile,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(64.dp)
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                if (decryptedBytes != null) {
+                                    Button(
+                                        onClick = { onToggleVoicePlay(message) },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = MaterialTheme.colorScheme.primary,
+                                            contentColor = MaterialTheme.colorScheme.onPrimary
+                                        )
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
+                                            contentDescription = null
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(if (isPlaying) "Stop Audio" else "Play Decrypted Audio")
+                                    }
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                }
+                            }
+
+                            else -> {
+                                Icon(
+                                    imageVector = if (message.payloadKind == MessagePayloadKind.IMAGE) {
+                                        Icons.Default.Image
+                                    } else {
+                                        Icons.Default.Description
+                                    },
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(64.dp)
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                if (textDocumentPreview != null) {
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.surface,
+                                        shape = RoundedCornerShape(12.dp),
+                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text(
+                                            text = textDocumentPreview,
+                                            style = MonospaceStyle.copy(fontSize = 11.sp),
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            modifier = Modifier.padding(12.dp)
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                }
+                                if (decryptedBytes != null) {
+                                    Button(
+                                        onClick = { onOpenExternally(message) },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = MaterialTheme.colorScheme.primary,
+                                            contentColor = MaterialTheme.colorScheme.onPrimary
+                                        )
+                                    ) {
+                                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null)
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("Open Document in Viewer")
+                                    }
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                }
+                            }
                         }
+
                         Text(
                             text = transfer.manifest.sanitizedFileName,
-                            style = MaterialTheme.typography.titleLarge
+                            style = MaterialTheme.typography.titleLarge,
+                            color = MaterialTheme.colorScheme.onSurface
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(6.dp))
                         Text(
                             text = "MIME: ${transfer.manifest.mimeType} • Size: ${transfer.manifest.totalSizeBytes} bytes • Chunks: ${transfer.manifest.totalChunks}",
-                            style = MonospaceStyle.copy(fontSize = 12.sp),
-                            color = CyanAccent
+                            style = MonospaceStyle.copy(fontSize = 11.sp),
+                            color = MaterialTheme.colorScheme.secondary
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "SHA-256 Verified: ${transfer.manifest.sha256DigestHex}",
+                            style = MonospaceStyle.copy(fontSize = 10.sp),
+                            color = MaterialTheme.colorScheme.primary
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "SHA-256 Integrity Verified:\n${transfer.manifest.sha256DigestHex}",
-                            style = MonospaceStyle.copy(fontSize = 11.sp),
-                            color = EmeraldPrimary
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = "Decrypted bytes reside exclusively in volatile JVM heap memory and are never written to MediaStore or disk cache.",
+                            text = "Decrypted bytes reside in volatile RAM until you choose Save to Gallery / Downloads or Wipe.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
 
-                Button(
+                if (decryptedBytes != null) {
+                    Button(
+                        onClick = { onSaveToGallery(message) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(50.dp)
+                            .testTag("preview_save_gallery_btn")
+                    ) {
+                        Icon(Icons.Default.Download, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Save to Device Gallery / Downloads", fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                OutlinedButton(
                     onClick = { onWipeFromRamAndClose(message) },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = CrimsonDanger,
-                        contentColor = Color.White
-                    ),
+                    shape = RoundedCornerShape(14.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(50.dp)
+                        .height(48.dp)
                 ) {
-                    Icon(Icons.Default.Delete, contentDescription = null)
+                    Icon(Icons.Default.Delete, contentDescription = null, tint = CrimsonDanger)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Zeroize Attachment Buffer (0x00) & Remove")
+                    Text("Zeroize Attachment Buffer (0x00) & Remove", color = CrimsonDanger)
                 }
             }
         }

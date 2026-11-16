@@ -24,11 +24,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.GroupAdd
@@ -71,7 +73,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -92,11 +96,9 @@ import com.zerotrace.ui.components.EmptyState
 import com.zerotrace.ui.components.ErrorState
 import com.zerotrace.ui.components.SecurityInformationCard
 import com.zerotrace.ui.components.ZeroTraceTopBar
-import com.zerotrace.ui.theme.AmberWarning
 import com.zerotrace.ui.theme.CrimsonDanger
-import com.zerotrace.ui.theme.CyanAccent
-import com.zerotrace.ui.theme.EmeraldPrimary
 import com.zerotrace.ui.theme.MonospaceStyle
+import com.zerotrace.ui.theme.ZeroTracePalette
 
 /**
  * WhatsApp-Style Chats Tab (Screen 1 of Section 4)
@@ -182,12 +184,11 @@ fun ZeroTraceHomeScreen(
         topBar = {
             ZeroTraceTopBar(
                 title = "ZeroTrace",
-                subtitle = if (isHi) "TOR v3 • पोस्ट-क्वांटम हाइब्रिड E2EE" else "TOR v3 • PQ-HYBRID RAM MESSENGER",
+                subtitle = "• TOR v3",
                 connectivityState = connectivityState,
                 torProgress = torProgress,
                 onSearchToggle = { searchBarExpanded = !searchBarExpanded },
                 onQrScannerClick = { onNavigate(ZeroTraceScreen.ADD_CONTACT) },
-                onSecurityDashboardClick = { onNavigate(ZeroTraceScreen.SECURITY_DASHBOARD) },
                 onEmergencyWipeClick = onEmergencyLock
             )
         },
@@ -195,7 +196,7 @@ fun ZeroTraceHomeScreen(
             FloatingActionButton(
                 onClick = { onNavigate(ZeroTraceScreen.ADD_CONTACT) },
                 containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = Color.Black,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
                 shape = RoundedCornerShape(16.dp),
                 modifier = Modifier.testTag("fab_new_secure_chat")
             ) {
@@ -244,7 +245,7 @@ fun ZeroTraceHomeScreen(
                 }
             }
 
-            // WhatsApp-style Filter Chips + Group Chat MLS Gate Chip
+            // WhatsApp-style Borderless Filter Chips + Group Chat MLS Gate Chip
             item {
                 Row(
                     modifier = Modifier
@@ -259,39 +260,54 @@ fun ZeroTraceHomeScreen(
                         FilterChip(
                             selected = selected,
                             onClick = { onFilterSelected(filter) },
+                            shape = RoundedCornerShape(50),
+                            border = null,
                             label = {
                                 Text(
                                     text = if (isHi) filter.labelHi else filter.labelEn,
-                                    style = MaterialTheme.typography.labelMedium
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
                                 )
                             },
                             colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
-                                selectedLabelColor = MaterialTheme.colorScheme.primary
+                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                labelColor = MaterialTheme.colorScheme.onSurface
                             ),
-                            modifier = Modifier.testTag("filter_chip_${filter.name.lowercase()}")
+                            modifier = Modifier
+                                .height(34.dp)
+                                .testTag("filter_chip_${filter.name.lowercase()}")
                         )
                     }
 
                     FilterChip(
                         selected = false,
                         onClick = { onShowGroupChatMlsDialog(true) },
+                        shape = RoundedCornerShape(50),
+                        border = null,
+                        colors = FilterChipDefaults.filterChipColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            labelColor = MaterialTheme.colorScheme.onSurface
+                        ),
                         leadingIcon = {
                             Icon(
                                 imageVector = Icons.Default.GroupAdd,
                                 contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                                tint = AmberWarning
+                                modifier = Modifier.size(15.dp),
+                                tint = MaterialTheme.colorScheme.secondary
                             )
                         },
                         label = {
                             Text(
-                                text = "Groups (MLS Gate)",
+                                text = "Groups",
                                 style = MaterialTheme.typography.labelMedium,
-                                color = AmberWarning
+                                color = MaterialTheme.colorScheme.onSurface
                             )
                         },
-                        modifier = Modifier.testTag("group_chat_mls_chip")
+                        modifier = Modifier
+                            .height(34.dp)
+                            .testTag("group_chat_mls_chip")
                     )
                 }
             }
@@ -308,9 +324,9 @@ fun ZeroTraceHomeScreen(
                             )
                         } else if (statusBanner != null) {
                             Surface(
-                                color = EmeraldPrimary.copy(alpha = 0.14f),
+                                color = ZeroTracePalette.mintContainer(),
                                 shape = RoundedCornerShape(12.dp),
-                                border = BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.55f)),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable { onDismissBanner() }
@@ -318,7 +334,7 @@ fun ZeroTraceHomeScreen(
                                 Text(
                                     text = statusBanner,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = EmeraldPrimary,
+                                    color = ZeroTracePalette.mintContent(),
                                     modifier = Modifier.padding(12.dp)
                                 )
                             }
@@ -382,14 +398,14 @@ fun ZeroTraceHomeScreen(
                                 Text(
                                     text = "Epoch ${activeRatchetMetrics.ratchetEpoch} • PQ Braids: ${activeRatchetMetrics.pqBraidStepsCompleted} • RAM Msgs: ${activeRatchetMetrics.volatileMessagesInRam}",
                                     style = MonospaceStyle.copy(fontSize = 11.sp),
-                                    color = CyanAccent
+                                    color = MaterialTheme.colorScheme.secondary
                                 )
                             }
                             Button(
                                 onClick = onResumeActiveChat,
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = MaterialTheme.colorScheme.primary,
-                                    contentColor = Color.Black
+                                    contentColor = MaterialTheme.colorScheme.onPrimary
                                 )
                             ) {
                                 Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -472,145 +488,122 @@ private fun TorConnectivityStrip(
     val statusColor = when (state) {
         ConnectivityState.ONION_SERVICE_READY,
         ConnectivityState.E2EE_SESSION_READY,
-        ConnectivityState.TOR_READY -> EmeraldPrimary
+        ConnectivityState.TOR_READY -> MaterialTheme.colorScheme.primary
         ConnectivityState.ERROR,
         ConnectivityState.OFFLINE -> CrimsonDanger
-        else -> AmberWarning
+        else -> MaterialTheme.colorScheme.tertiary
     }
 
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(16.dp),
-        border = BorderStroke(1.dp, statusColor.copy(alpha = 0.45f)),
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .testTag("tor_status_card")
+            .testTag("tor_status_card"),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+        if (progress in 1..99 || state == ConnectivityState.ERROR) {
+            Surface(
+                color = ZeroTracePalette.mintContainer(),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.weight(1f)
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(9.dp)
-                            .clip(CircleShape)
-                            .background(statusColor)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column {
-                        val headerText = if (progress in 1..99) {
-                            "${if (isHi) state.labelHi else state.labelEn} ($progress%)"
+                    Text(
+                        text = if (state == ConnectivityState.ERROR) {
+                            bootstrapSummary ?: "Tor circuit disconnected • Tap retry"
                         } else {
-                            if (isHi) state.labelHi else state.labelEn
-                        }
-                        Text(
-                            text = headerText,
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        val detailLine = when {
-                            !bootstrapSummary.isNullOrBlank() &&
-                                (state == ConnectivityState.INITIALIZING ||
-                                    state == ConnectivityState.TOR_BOOTSTRAPPING ||
-                                    state == ConnectivityState.ONION_SERVICE_STARTING) ->
-                                bootstrapSummary
-                            onionAddress != null -> onionAddress
-                            else -> if (isHi) backend.labelHi else backend.labelEn
-                        }
-                        Text(
-                            text = detailLine,
-                            style = MonospaceStyle.copy(fontSize = 10.sp),
-                            color = CyanAccent,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                            "${if (isHi) state.labelHi else state.labelEn} ($progress%)"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = ZeroTracePalette.mintContent(),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
                     IconButton(
                         onClick = onRetryTor,
                         modifier = Modifier
-                            .size(32.dp)
+                            .size(28.dp)
                             .testTag("retry_tor_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.Refresh,
                             contentDescription = "Reconnect Tor",
                             tint = statusColor,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                    IconButton(
-                        onClick = onEmergencyLock,
-                        modifier = Modifier
-                            .size(32.dp)
-                            .testTag("emergency_lock_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.PowerSettingsNew,
-                            contentDescription = "Emergency Lock & Wipe",
-                            tint = CrimsonDanger,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                 }
             }
+        }
 
-            if (progress in 1..99) {
-                LinearProgressIndicator(
-                    progress = { progress / 100f },
-                    color = statusColor,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+        // Exact Mockup Screen 1: Side-by-Side QR & Pairing + Pair Contact Row
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Surface(
+                onClick = onMyQrClick,
+                color = MaterialTheme.colorScheme.surface,
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(48.dp)
+                    .testTag("home_my_qr_button")
             ) {
-                OutlinedButton(
-                    onClick = onMyQrClick,
-                    shape = RoundedCornerShape(10.dp),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("home_my_qr_button")
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
                 ) {
-                    Icon(Icons.Default.QrCode, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(if (isHi) "मेरा QR" else "My QR Invite", style = MaterialTheme.typography.labelMedium)
-                }
-
-                Button(
-                    onClick = onAddContactClick,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = Color.Black
-                    ),
-                    shape = RoundedCornerShape(10.dp),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("home_add_contact_button")
-                ) {
-                    Icon(Icons.Default.QrCodeScanner, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        if (isHi) "संपर्क जोड़ें" else "Pair Contact",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold
+                    Icon(
+                        imageVector = Icons.Default.QrCode,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.size(18.dp)
                     )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column {
+                        Text(
+                            text = if (isHi) "QR व पेयरिंग" else "QR & Pairing",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1
+                        )
+                        Text(
+                            text = if (isHi) "मेरा QR आमंत्रण" else "My QR Invite",
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1
+                        )
+                    }
                 }
+            }
+
+            Button(
+                onClick = onAddContactClick,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
+                ),
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(48.dp)
+                    .testTag("home_add_contact_button")
+            ) {
+                Icon(Icons.Default.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    if (isHi) "संपर्क जोड़ें" else "Pair Contact",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold
+                )
             }
         }
     }
@@ -639,16 +632,37 @@ fun ContactProfileScreen(
     onDeleteContact: () -> Unit
 ) {
     val encryptedFilesCount = sharedMessagesInRam.count { it.fileTransfer != null }
+    @Suppress("DEPRECATION")
+    val clipboard = LocalClipboardManager.current
+    var copiedPeerId by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
-            ZeroTraceTopBar(
-                title = "Contact Security Profile",
-                subtitle = "Verified Peer Identity & Fingerprints",
-                connectivityState = connectivityState,
-                torProgress = torProgress,
-                onBackClick = onBack
-            )
+            Surface(color = MaterialTheme.colorScheme.surface) {
+                Column {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                imageVector = androidx.compose.material.icons.Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back",
+                                tint = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Contact Info",
+                            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                }
+            }
         },
         containerColor = MaterialTheme.colorScheme.background
     ) { padding ->
@@ -661,82 +675,155 @@ fun ContactProfileScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp),
             contentPadding = PaddingValues(vertical = 16.dp)
         ) {
-            // Header Avatar + Alias + Action Row
+            // Mockup Contact Header: Avatar, Alias, Peer ID Mint Box, Call + Message Buttons
             item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                    shape = RoundedCornerShape(20.dp),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                    modifier = Modifier.fillMaxWidth()
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(20.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        ContactAvatar(
-                            alias = contact.alias,
-                            onionAddress = contact.onionAddress,
-                            isVerified = !contact.identityChangedWarning,
-                            size = 82.dp
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = contact.alias,
-                                style = MaterialTheme.typography.headlineSmall,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Icon(
-                                imageVector = Icons.Default.VerifiedUser,
-                                contentDescription = "Verified",
-                                tint = EmeraldPrimary,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(4.dp))
+                    ContactAvatar(
+                        alias = contact.alias,
+                        onionAddress = contact.onionAddress,
+                        isVerified = !contact.identityChangedWarning,
+                        size = 86.dp
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = contact.onionAddress,
-                            style = MonospaceStyle.copy(fontSize = 11.sp),
-                            color = CyanAccent
+                            text = contact.alias,
+                            style = MaterialTheme.typography.headlineSmall,
+                            color = MaterialTheme.colorScheme.onSurface
                         )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Icon(
+                            imageVector = Icons.Default.VerifiedUser,
+                            contentDescription = "Verified",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(3.dp))
+                    Text(
+                        text = "Online • Peer-${contact.onionAddress.take(6).uppercase()} • TOR v3",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
 
-                        Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(14.dp))
 
+                    // Soft Mint Peer ID & Safety Number Box (Mockup)
+                    Surface(
+                        color = ZeroTracePalette.mintContainer(),
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceEvenly
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            ProfileActionPill(
-                                icon = Icons.AutoMirrored.Filled.Chat,
-                                label = "Message",
-                                tint = EmeraldPrimary,
-                                tag = "profile_start_chat_btn",
-                                onClick = onStartChat
-                            )
-                            ProfileActionPill(
-                                icon = Icons.Default.Call,
-                                label = "Audio Call",
-                                tint = CyanAccent,
-                                tag = "profile_voice_call_btn",
-                                onClick = onStartVoiceCall
-                            )
-                            ProfileActionPill(
-                                icon = Icons.Default.Videocam,
-                                label = "Video Call",
-                                tint = CyanAccent,
-                                tag = "profile_video_call_btn",
-                                onClick = onStartVideoCall
-                            )
-                            ProfileActionPill(
-                                icon = Icons.Default.QrCode,
-                                label = "Re-Verify",
-                                tint = AmberWarning,
-                                tag = "profile_reverify_btn",
-                                onClick = onReverifyQr
-                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Peer ID: ${contact.onionAddress}",
+                                    style = MonospaceStyle.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
+                                    color = ZeroTracePalette.mintContent(),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Safety Number: ${contact.classicalSafetyDigits} • Verified ✓",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = ZeroTracePalette.mintContent()
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    clipboard.setText(AnnotatedString(contact.onionAddress))
+                                    copiedPeerId = true
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ContentCopy,
+                                    contentDescription = if (copiedPeerId) "Copied Peer ID" else "Copy Peer ID",
+                                    tint = ZeroTracePalette.mintContent()
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Primary 2-Button Action Row (Call & Message matching mockup)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Button(
+                            onClick = onStartVoiceCall,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary
+                            ),
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("profile_voice_call_btn")
+                        ) {
+                            Icon(Icons.Default.Call, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Call", fontWeight = FontWeight.Bold)
+                        }
+
+                        Button(
+                            onClick = onStartChat,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (ZeroTracePalette.isLight()) Color(0xFF64748B) else MaterialTheme.colorScheme.surfaceVariant,
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("profile_start_chat_btn")
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Message", fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = onStartVideoCall,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("profile_video_call_btn")
+                        ) {
+                            Icon(Icons.Default.Videocam, contentDescription = null, modifier = Modifier.size(17.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Video Call")
+                        }
+                        OutlinedButton(
+                            onClick = onReverifyQr,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("profile_reverify_btn")
+                        ) {
+                            Icon(Icons.Default.QrCode, contentDescription = null, modifier = Modifier.size(17.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Re-Verify QR")
                         }
                     }
                 }
@@ -747,7 +834,7 @@ fun ContactProfileScreen(
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                     shape = RoundedCornerShape(16.dp),
-                    border = BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.4f)),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(
@@ -758,13 +845,13 @@ fun ContactProfileScreen(
                             Icon(
                                 imageVector = Icons.Default.Fingerprint,
                                 contentDescription = null,
-                                tint = EmeraldPrimary
+                                tint = MaterialTheme.colorScheme.primary
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = "Dual Safety Numbers & Fingerprints",
                                 style = MaterialTheme.typography.titleSmall,
-                                color = EmeraldPrimary
+                                color = MaterialTheme.colorScheme.primary
                             )
                         }
                         Text(
@@ -775,7 +862,7 @@ fun ContactProfileScreen(
                         Text(
                             text = "Post-Quantum (ML-DSA-87 + ML-KEM-1024) Safety Digits:\n${contact.pqSafetyDigits}",
                             style = MonospaceStyle.copy(fontSize = 12.sp),
-                            color = CyanAccent
+                            color = MaterialTheme.colorScheme.secondary
                         )
                         Text(
                             text = "SHA-256 Classical FP: ${contact.classicalFingerprintHex.take(32)}…\nSHA-256 PQ FP: ${contact.pqFingerprintHex.take(32)}…",
@@ -791,6 +878,7 @@ fun ContactProfileScreen(
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                     shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(
@@ -808,17 +896,22 @@ fun ContactProfileScreen(
                             Text(
                                 text = "$encryptedFilesCount file(s)",
                                 style = MonospaceStyle.copy(fontSize = 12.sp),
-                                color = EmeraldPrimary
+                                color = MaterialTheme.colorScheme.primary
                             )
                         }
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.Timer, contentDescription = null, tint = CyanAccent, modifier = Modifier.size(18.dp))
+                                Icon(
+                                    Icons.Default.Timer,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.secondary,
+                                    modifier = Modifier.size(18.dp)
+                                )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
                                     text = "Inactivity RAM Auto-Purge Timer",
@@ -828,7 +921,7 @@ fun ContactProfileScreen(
                             Text(
                                 text = "${disappearingTimerSec / 60} min",
                                 style = MonospaceStyle.copy(fontSize = 12.sp),
-                                color = CyanAccent
+                                color = MaterialTheme.colorScheme.secondary
                             )
                         }
                     }
@@ -851,9 +944,9 @@ fun ContactProfileScreen(
                             onClick = onClearChatHistoryRam,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Icon(Icons.Default.Delete, contentDescription = null, tint = AmberWarning)
+                            Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary)
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Wipe Volatile Chat & File Buffers in RAM", color = AmberWarning)
+                            Text("Wipe Volatile Chat & File Buffers in RAM", color = MaterialTheme.colorScheme.tertiary)
                         }
 
                         OutlinedButton(
@@ -887,40 +980,8 @@ fun ContactProfileScreen(
     }
 }
 
-@Composable
-private fun ProfileActionPill(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    tint: Color,
-    tag: String,
-    onClick: () -> Unit
-) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
-            .clickable(onClick = onClick)
-            .padding(6.dp)
-            .testTag(tag)
-    ) {
-        Box(
-            modifier = Modifier
-                .size(48.dp)
-                .clip(CircleShape)
-                .background(tint.copy(alpha = 0.15f))
-                .border(1.dp, tint.copy(alpha = 0.5f), CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(imageVector = icon, contentDescription = label, tint = tint)
-        }
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(text = label, style = MaterialTheme.typography.labelSmall)
-    }
-}
-
 /**
  * Section 10: Group Chats Architecture Evaluation Dialog
- * Explains why ZeroTrace refuses to fake group chats by reusing a 1-to-1 Double Ratchet session
- * and documents the required MLS (RFC 9420) / Sender Keys architecture over Tor.
  */
 @Composable
 fun GroupChatMlsSecurityDialog(onDismiss: () -> Unit) {
@@ -930,7 +991,7 @@ fun GroupChatMlsSecurityDialog(onDismiss: () -> Unit) {
             Icon(
                 imageVector = Icons.Default.Shield,
                 contentDescription = null,
-                tint = AmberWarning
+                tint = MaterialTheme.colorScheme.tertiary
             )
         },
         title = {
@@ -944,7 +1005,7 @@ fun GroupChatMlsSecurityDialog(onDismiss: () -> Unit) {
                 Text(
                     text = "Why 1-to-1 Double Ratchet is NOT reused for Groups:",
                     style = MaterialTheme.typography.labelLarge,
-                    color = AmberWarning
+                    color = MaterialTheme.colorScheme.tertiary
                 )
                 Text(
                     text = "A 1-to-1 Hybrid Double Ratchet + ML-KEM-1024 Braid session derives symmetric chains strictly between two verified key bundles. Reusing a pairwise session for multi-party fanout breaks transcript consistency, forward secrecy on member removal, and out-of-order tree ratcheting.",

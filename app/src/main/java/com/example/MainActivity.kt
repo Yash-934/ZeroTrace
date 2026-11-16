@@ -224,8 +224,12 @@ fun ZeroTraceRootApp(
                                 statuses = uiState.ephemeralStatuses,
                                 privacyPolicy = uiState.statusPrivacyPolicy,
                                 onPrivacyPolicyChange = viewModel::setStatusPrivacyPolicy,
-                                onPublishStatus = { caption, mediaType ->
-                                    viewModel.publishOwnEphemeralStatus(caption, mediaType)
+                                onPublishStatus = { caption, mediaType, mediaUri ->
+                                    viewModel.publishOwnEphemeralStatus(
+                                        caption = caption,
+                                        mediaType = mediaType,
+                                        mediaUri = mediaUri
+                                    )
                                 },
                                 onOpenStatusViewer = viewModel::openStatusViewer,
                                 onDeleteStatus = viewModel::deleteEphemeralStatus,
@@ -369,6 +373,8 @@ fun ZeroTraceRootApp(
                 onDeleteMessageFromRam = viewModel::deleteSingleMessageFromRam,
                 onInspectMessageInfo = viewModel::setInspectedMessageInfo,
                 onOpenMediaPreview = viewModel::openMediaPreview,
+                onSaveMediaToGallery = viewModel::saveMessageMediaToGallery,
+                onOpenMediaExternally = viewModel::openMessageMediaExternally,
                 onShowAttachmentSheet = viewModel::setShowAttachmentSheet,
                 onToggleVoiceRecording = viewModel::toggleVoiceNoteRecording,
                 onCancelVoiceRecording = viewModel::cancelVoiceNoteRecording,
@@ -433,6 +439,7 @@ fun ZeroTraceRootApp(
                         viewModel.startAuthenticatedSessionWithContact(matchingContact)
                     }
                 },
+                onSaveStatusToGallery = viewModel::saveStatusMediaToGallery,
                 onDeleteOwnStatus = viewModel::deleteEphemeralStatus
             )
         }
@@ -482,6 +489,10 @@ fun ZeroTraceRootApp(
                 message = uiState.mediaPreviewMessage,
                 connectivityState = connectivityState,
                 torProgress = torProgress,
+                playingVoiceMessageId = playingVoiceMessageId,
+                onToggleVoicePlay = viewModel::toggleVoiceNotePlayback,
+                onSaveToGallery = viewModel::saveMessageMediaToGallery,
+                onOpenExternally = viewModel::openMessageMediaExternally,
                 onBack = { viewModel.navigateBack() },
                 onWipeFromRamAndClose = { msg ->
                     viewModel.deleteSingleMessageFromRam(msg)

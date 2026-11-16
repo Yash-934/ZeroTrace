@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -26,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
@@ -39,6 +41,7 @@ import androidx.compose.material.icons.filled.ContactPage
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.EmojiEmotions
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.FlipCameraAndroid
@@ -64,8 +67,6 @@ import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.filled.VolumeUp
-import androidx.compose.material3.Badge
-import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -73,19 +74,18 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -116,11 +116,9 @@ import com.zerotrace.bridge.VerifiedContactRecord
 import com.zerotrace.network.ConnectivityState
 import com.zerotrace.ui.theme.MonospaceStyle
 import com.zerotrace.ui.theme.ZeroTraceAmber
-import com.zerotrace.ui.theme.ZeroTraceCyan
 import com.zerotrace.ui.theme.ZeroTraceEmerald
-import com.zerotrace.ui.theme.ZeroTraceOutgoingBubble
+import com.zerotrace.ui.theme.ZeroTracePalette
 import com.zerotrace.ui.theme.ZeroTraceRed
-import com.zerotrace.ui.theme.ZeroTraceSurfaceElevated
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -147,13 +145,13 @@ fun ZeroTraceTopBar(
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 3.dp
+        tonalElevation = if (ZeroTracePalette.isLight()) 0.dp else 3.dp
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
@@ -176,20 +174,15 @@ fun ZeroTraceTopBar(
                         Box(
                             modifier = Modifier
                                 .size(38.dp)
-                                .clip(RoundedCornerShape(11.dp))
-                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f))
-                                .border(
-                                    1.dp,
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
-                                    RoundedCornerShape(11.dp)
-                                ),
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Shield,
                                 contentDescription = "ZeroTrace Shield",
                                 tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(21.dp)
+                                modifier = Modifier.size(22.dp)
                             )
                         }
                         Spacer(modifier = Modifier.width(10.dp))
@@ -198,7 +191,7 @@ fun ZeroTraceTopBar(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = title,
-                            style = MaterialTheme.typography.titleLarge,
+                            style = MaterialTheme.typography.titleLarge.copy(fontSize = 21.sp, fontWeight = FontWeight.Bold),
                             color = MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
                             softWrap = false,
@@ -339,60 +332,97 @@ fun ZeroTraceBottomNavigation(
     isHindi: Boolean,
     onTabSelected: (MainBottomTab) -> Unit
 ) {
-    NavigationBar(
-        containerColor = MaterialTheme.colorScheme.surface,
-        tonalElevation = 8.dp,
-        modifier = Modifier.testTag("zerotrace_bottom_nav")
+    val isLight = ZeroTracePalette.isLight()
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = if (isLight) 0.dp else 6.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("zerotrace_bottom_nav")
     ) {
-        MainBottomTab.entries.forEach { tab ->
-            val badgeCount = when (tab) {
-                MainBottomTab.CHATS -> unreadChatsCount
-                MainBottomTab.UPDATES -> activeUpdatesCount
-                MainBottomTab.CALLS -> missedCallsCount
-                MainBottomTab.SETTINGS -> 0
-            }
-            val selected = selectedTab == tab
-            NavigationBarItem(
-                selected = selected,
-                onClick = { onTabSelected(tab) },
-                modifier = Modifier.testTag(tab.tag),
-                icon = {
-                    BadgedBox(
-                        badge = {
+        Column(modifier = Modifier.navigationBarsPadding()) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                MainBottomTab.entries.forEach { tab ->
+                    val badgeCount = when (tab) {
+                        MainBottomTab.CHATS -> unreadChatsCount
+                        MainBottomTab.UPDATES -> activeUpdatesCount
+                        MainBottomTab.CALLS -> missedCallsCount
+                        MainBottomTab.SETTINGS -> 0
+                    }
+                    val selected = selectedTab == tab
+                    val pillContainer = when {
+                        selected -> MaterialTheme.colorScheme.primary
+                        isLight -> Color(0xFF6B7280)
+                        else -> MaterialTheme.colorScheme.surfaceVariant
+                    }
+                    val pillContent = when {
+                        selected -> MaterialTheme.colorScheme.onPrimary
+                        isLight -> Color.White
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                    Surface(
+                        color = pillContainer,
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(38.dp)
+                            .clip(RoundedCornerShape(50))
+                            .clickable { onTabSelected(tab) }
+                            .testTag(tab.tag)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = tab.icon,
+                                contentDescription = if (isHindi) tab.labelHi else tab.labelEn,
+                                tint = pillContent,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = if (isHindi) tab.labelHi else tab.labelEn,
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    fontSize = 11.sp,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold
+                                ),
+                                color = pillContent,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
                             if (badgeCount > 0) {
-                                Badge(
-                                    containerColor = MaterialTheme.colorScheme.primary,
-                                    contentColor = Color.Black
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .size(16.dp)
+                                        .clip(CircleShape)
+                                        .background(if (selected) Color.White else MaterialTheme.colorScheme.primary),
+                                    contentAlignment = Alignment.Center
                                 ) {
                                     Text(
-                                        text = badgeCount.toString(),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold
+                                        text = badgeCount.coerceAtMost(9).toString(),
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold
+                                        ),
+                                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onPrimary
                                     )
                                 }
                             }
                         }
-                    ) {
-                        Icon(
-                            imageVector = tab.icon,
-                            contentDescription = if (isHindi) tab.labelHi else tab.labelEn
-                        )
                     }
-                },
-                label = {
-                    Text(
-                        text = if (isHindi) tab.labelHi else tab.labelEn,
-                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
-                    )
-                },
-                colors = NavigationBarItemDefaults.colors(
-                    selectedIconColor = MaterialTheme.colorScheme.primary,
-                    selectedTextColor = MaterialTheme.colorScheme.primary,
-                    indicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
-                    unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                    unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            )
+                }
+            }
         }
     }
 }
@@ -403,47 +433,49 @@ fun SecureStatusBadge(
     torProgress: Int,
     modifier: Modifier = Modifier
 ) {
+    val isLight = ZeroTracePalette.isLight()
     val badgeColor = when (connectivityState) {
-        ConnectivityState.E2EE_SESSION_READY -> ZeroTraceEmerald
-        ConnectivityState.ONION_SERVICE_READY, ConnectivityState.TOR_READY -> ZeroTraceCyan
+        ConnectivityState.E2EE_SESSION_READY -> MaterialTheme.colorScheme.primary
+        ConnectivityState.ONION_SERVICE_READY, ConnectivityState.TOR_READY -> MaterialTheme.colorScheme.primary
         ConnectivityState.TOR_BOOTSTRAPPING,
         ConnectivityState.AUTHENTICATING_PEER,
         ConnectivityState.CONNECTING_TO_PEER,
         ConnectivityState.ONION_SERVICE_STARTING,
-        ConnectivityState.INITIALIZING -> ZeroTraceAmber
+        ConnectivityState.INITIALIZING -> MaterialTheme.colorScheme.tertiary
         ConnectivityState.ERROR, ConnectivityState.OFFLINE, ConnectivityState.DISCONNECTING -> ZeroTraceRed
     }
     val shortLabel = when (connectivityState) {
-        ConnectivityState.E2EE_SESSION_READY -> "PQ-E2EE LIVE"
-        ConnectivityState.ONION_SERVICE_READY -> "TOR v3 READY"
+        ConnectivityState.E2EE_SESSION_READY -> "E2EE LIVE"
+        ConnectivityState.ONION_SERVICE_READY -> "ONLINE"
+        ConnectivityState.TOR_READY -> "TOR READY"
         ConnectivityState.TOR_BOOTSTRAPPING -> "TOR $torProgress%"
         ConnectivityState.AUTHENTICATING_PEER -> "PQXDH..."
         ConnectivityState.OFFLINE -> "OFFLINE"
-        ConnectivityState.ERROR -> "FAIL-CLOSED"
+        ConnectivityState.ERROR -> "OFFLINE"
         else -> connectivityState.code.take(10)
     }
 
     Surface(
-        color = badgeColor.copy(alpha = 0.14f),
+        color = if (isLight) badgeColor else badgeColor.copy(alpha = 0.14f),
         shape = RoundedCornerShape(50),
-        border = BorderStroke(1.dp, badgeColor.copy(alpha = 0.45f)),
+        border = if (isLight) null else BorderStroke(1.dp, badgeColor.copy(alpha = 0.45f)),
         modifier = modifier
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
-                    .size(6.dp)
+                    .size(5.dp)
                     .clip(CircleShape)
-                    .background(badgeColor)
+                    .background(if (isLight) Color.White else badgeColor)
             )
-            Spacer(modifier = Modifier.width(5.dp))
+            Spacer(modifier = Modifier.width(4.dp))
             Text(
                 text = shortLabel,
-                style = MonospaceStyle.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
-                color = badgeColor,
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.5.sp, fontWeight = FontWeight.Bold),
+                color = if (isLight) Color.White else badgeColor,
                 maxLines = 1,
                 softWrap = false,
                 overflow = TextOverflow.Ellipsis
@@ -554,14 +586,10 @@ fun ChatListItem(
     onClearChatRam: () -> Unit
 ) {
     var contextMenuExpanded by remember { mutableStateOf(false) }
-    val timeFormatter = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+    val timeFormatter = remember { SimpleDateFormat("hh:mm a", Locale.getDefault()) }
 
     Surface(
-        color = if (isSessionLive) {
-            MaterialTheme.colorScheme.primary.copy(alpha = 0.06f)
-        } else {
-            Color.Transparent
-        },
+        color = Color.Transparent,
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(
@@ -583,7 +611,7 @@ fun ChatListItem(
                 isOnlineOrSessionActive = isSessionLive,
                 modifier = Modifier.clickable { onProfileClick() }
             )
-            Spacer(modifier = Modifier.width(14.dp))
+            Spacer(modifier = Modifier.width(12.dp))
 
             Column(modifier = Modifier.weight(1f)) {
                 Row(
@@ -598,33 +626,55 @@ fun ChatListItem(
                         Text(
                             text = contact.alias,
                             style = MaterialTheme.typography.titleMedium.copy(
-                                fontWeight = if (unreadCount > 0) FontWeight.Bold else FontWeight.SemiBold
+                                fontSize = 15.5.sp,
+                                fontWeight = FontWeight.Bold
                             ),
                             color = MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(5.dp))
                         Icon(
                             imageVector = Icons.Default.Lock,
                             contentDescription = "E2EE Verified",
-                            tint = if (contact.identityChangedWarning) ZeroTraceRed else ZeroTraceEmerald,
-                            modifier = Modifier.size(14.dp)
+                            tint = if (contact.identityChangedWarning) ZeroTraceRed else MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(13.dp)
                         )
                     }
 
-                    Text(
-                        text = timeFormatter.format(Date(lastMessageTimeMillis)),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (unreadCount > 0) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = timeFormatter.format(Date(lastMessageTimeMillis)),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (unreadCount > 0) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
+                        if (unreadCount > 0) {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Box(
+                                modifier = Modifier
+                                    .size(20.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primary),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = unreadCount.toString(),
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    ),
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                            }
                         }
-                    )
+                    }
                 }
 
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(3.dp))
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -632,8 +682,8 @@ fun ChatListItem(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = lastMessagePreview,
-                        style = MaterialTheme.typography.bodyMedium,
+                        text = "$lastMessagePreview • onion: ${contact.onionAddress.take(11)}…",
+                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.5.sp),
                         color = if (unreadCount > 0) {
                             MaterialTheme.colorScheme.onSurface
                         } else {
@@ -652,7 +702,7 @@ fun ChatListItem(
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier
                                     .padding(start = 6.dp)
-                                    .size(16.dp)
+                                    .size(15.dp)
                             )
                         }
                         if (isPinned) {
@@ -662,36 +712,11 @@ fun ChatListItem(
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier
                                     .padding(start = 6.dp)
-                                    .size(16.dp)
+                                    .size(15.dp)
                             )
-                        }
-                        if (unreadCount > 0) {
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Box(
-                                modifier = Modifier
-                                    .size(21.dp)
-                                    .clip(CircleShape)
-                                    .background(MaterialTheme.colorScheme.primary),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = unreadCount.toString(),
-                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                    color = Color.Black
-                                )
-                            }
                         }
                     }
                 }
-
-                Spacer(modifier = Modifier.height(3.dp))
-                Text(
-                    text = "${contact.onionAddress.take(16)}…onion • Safety ${contact.classicalSafetyDigits.take(11)}",
-                    style = MonospaceStyle.copy(fontSize = 10.sp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
             }
 
             DropdownMenu(
@@ -755,23 +780,28 @@ fun MessageBubble(
     onAcceptFileTransfer: ((String) -> Unit)? = null,
     onRejectFileTransfer: ((String) -> Unit)? = null,
     onMediaPreviewClick: ((RichConversationMessage) -> Unit)? = null,
+    onSaveMediaClick: ((RichConversationMessage) -> Unit)? = null,
+    onOpenExternallyClick: ((RichConversationMessage) -> Unit)? = null,
     onVoicePlayToggle: ((RichConversationMessage) -> Unit)? = null
 ) {
     var actionMenuExpanded by remember { mutableStateOf(false) }
-    val timeFormatter = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+    val timeFormatter = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
 
     val bubbleBg = if (message.isOutgoing) {
-        ZeroTraceOutgoingBubble
+        ZeroTracePalette.outgoingBubble()
     } else {
-        ZeroTraceSurfaceElevated
+        ZeroTracePalette.incomingBubble()
     }
     val bubbleBorder = if (message.pqBraidAdvanced) {
-        ZeroTraceCyan.copy(alpha = 0.65f)
+        MaterialTheme.colorScheme.secondary.copy(alpha = 0.55f)
     } else if (message.isOutgoing) {
-        ZeroTraceEmerald.copy(alpha = 0.35f)
+        MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
     } else {
         MaterialTheme.colorScheme.outline
     }
+    val innerSurfaceColor = ZeroTracePalette.bubbleInnerCard()
+    val emeraldTint = MaterialTheme.colorScheme.primary
+    val tealTint = MaterialTheme.colorScheme.secondary
 
     Column(
         modifier = Modifier
@@ -789,6 +819,7 @@ fun MessageBubble(
                     bottomEnd = if (message.isOutgoing) 4.dp else 16.dp
                 ),
                 border = BorderStroke(1.dp, bubbleBorder),
+                shadowElevation = if (ZeroTracePalette.isLight()) 1.dp else 0.dp,
                 modifier = Modifier
                     .widthIn(min = 120.dp, max = 320.dp)
                     .combinedClickable(
@@ -796,7 +827,8 @@ fun MessageBubble(
                             if (message.payloadKind in setOf(
                                     MessagePayloadKind.IMAGE,
                                     MessagePayloadKind.VIDEO,
-                                    MessagePayloadKind.DOCUMENT
+                                    MessagePayloadKind.DOCUMENT,
+                                    MessagePayloadKind.AUDIO_FILE
                                 )
                             ) {
                                 onMediaPreviewClick?.invoke(message)
@@ -812,7 +844,7 @@ fun MessageBubble(
                     // Reply Preview Banner if replying to an earlier message
                     if (!message.replyToPreview.isNullOrBlank()) {
                         Surface(
-                            color = Color.Black.copy(alpha = 0.26f),
+                            color = innerSurfaceColor,
                             shape = RoundedCornerShape(8.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -826,7 +858,7 @@ fun MessageBubble(
                                     modifier = Modifier
                                         .width(3.dp)
                                         .height(32.dp)
-                                        .background(ZeroTraceEmerald, RoundedCornerShape(2.dp))
+                                        .background(emeraldTint, RoundedCornerShape(2.dp))
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Column {
@@ -834,7 +866,7 @@ fun MessageBubble(
                                         Text(
                                             text = message.replyToSenderLabel,
                                             style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                            color = ZeroTraceEmerald,
+                                            color = emeraldTint,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis
                                         )
@@ -859,9 +891,9 @@ fun MessageBubble(
                         MessagePayloadKind.AUDIO_FILE -> {
                             val transfer = message.fileTransfer
                             Surface(
-                                color = Color.Black.copy(alpha = 0.25f),
+                                color = innerSurfaceColor,
                                 shape = RoundedCornerShape(10.dp),
-                                border = BorderStroke(1.dp, ZeroTraceCyan.copy(alpha = 0.35f)),
+                                border = BorderStroke(1.dp, tealTint.copy(alpha = 0.28f)),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(bottom = 6.dp)
@@ -892,6 +924,40 @@ fun MessageBubble(
                                                 .clickable { onMediaPreviewClick?.invoke(message) }
                                         )
                                         Spacer(modifier = Modifier.height(8.dp))
+                                    } else if (message.payloadKind == MessagePayloadKind.VIDEO && decryptedBytes != null) {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(110.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(Color(0xFF0F172A))
+                                                .clickable { onMediaPreviewClick?.invoke(message) },
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(44.dp)
+                                                        .clip(CircleShape)
+                                                        .background(emeraldTint),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.PlayArrow,
+                                                        contentDescription = "Play Video",
+                                                        tint = Color.White,
+                                                        modifier = Modifier.size(26.dp)
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                Text(
+                                                    text = "Tap to Play Encrypted Video",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = Color.White
+                                                )
+                                            }
+                                        }
+                                        Spacer(modifier = Modifier.height(8.dp))
                                     }
 
                                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -903,8 +969,8 @@ fun MessageBubble(
                                             IconButton(
                                                 onClick = { onVoicePlayToggle(message) },
                                                 colors = IconButtonDefaults.iconButtonColors(
-                                                    containerColor = ZeroTraceEmerald,
-                                                    contentColor = Color.Black
+                                                    containerColor = emeraldTint,
+                                                    contentColor = MaterialTheme.colorScheme.onPrimary
                                                 ),
                                                 modifier = Modifier.size(36.dp)
                                             ) {
@@ -924,7 +990,7 @@ fun MessageBubble(
                                             Icon(
                                                 imageVector = icon,
                                                 contentDescription = message.payloadKind.name,
-                                                tint = ZeroTraceCyan,
+                                                tint = tealTint,
                                                 modifier = Modifier.size(24.dp)
                                             )
                                         }
@@ -954,7 +1020,7 @@ fun MessageBubble(
                                                 Text(
                                                     text = "Receiver consent required before decrypting chunks in RAM",
                                                     style = MaterialTheme.typography.labelSmall,
-                                                    color = ZeroTraceAmber
+                                                    color = MaterialTheme.colorScheme.tertiary
                                                 )
                                                 if (transfer.direction == TransferDirection.INCOMING &&
                                                     onAcceptFileTransfer != null &&
@@ -965,8 +1031,8 @@ fun MessageBubble(
                                                         Button(
                                                             onClick = { onAcceptFileTransfer(transfer.manifest.transferId) },
                                                             colors = ButtonDefaults.buttonColors(
-                                                                containerColor = ZeroTraceEmerald,
-                                                                contentColor = Color.Black
+                                                                containerColor = emeraldTint,
+                                                                contentColor = MaterialTheme.colorScheme.onPrimary
                                                             ),
                                                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
                                                         ) {
@@ -991,21 +1057,68 @@ fun MessageBubble(
                                                 LinearProgressIndicator(
                                                     progress = { progress },
                                                     modifier = Modifier.fillMaxWidth(),
-                                                    color = ZeroTraceEmerald
+                                                    color = emeraldTint
                                                 )
                                                 Text(
                                                     text = "${transfer.state.name} (${transfer.chunksProcessed}/${transfer.manifest.totalChunks})",
                                                     style = MonospaceStyle.copy(fontSize = 10.sp),
-                                                    color = ZeroTraceCyan
+                                                    color = tealTint
                                                 )
                                             }
 
                                             TransferLifecycleState.VERIFIED_READY_IN_RAM -> {
                                                 Text(
-                                                    text = "✓ ChaCha20-Poly1305 + SHA-256 Verified (${transfer.manifest.sha256DigestHex.take(12)}…)",
+                                                    text = "✓ ChaCha20-Poly1305 Verified (${transfer.manifest.sha256DigestHex.take(10)}…)",
                                                     style = MonospaceStyle.copy(fontSize = 10.sp),
-                                                    color = ZeroTraceEmerald
+                                                    color = emeraldTint
                                                 )
+                                                if (decryptedBytes != null && (onMediaPreviewClick != null || onSaveMediaClick != null)) {
+                                                    Spacer(modifier = Modifier.height(6.dp))
+                                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                        if (onMediaPreviewClick != null) {
+                                                            OutlinedButton(
+                                                                onClick = {
+                                                                    if (message.payloadKind == MessagePayloadKind.DOCUMENT && onOpenExternallyClick != null) {
+                                                                        onMediaPreviewClick(message)
+                                                                    } else {
+                                                                        onMediaPreviewClick(message)
+                                                                    }
+                                                                },
+                                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                                                modifier = Modifier.height(32.dp)
+                                                            ) {
+                                                                Icon(
+                                                                    imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                                                                    contentDescription = null,
+                                                                    modifier = Modifier.size(14.dp)
+                                                                )
+                                                                Spacer(modifier = Modifier.width(4.dp))
+                                                                Text("Open", style = MaterialTheme.typography.labelSmall)
+                                                            }
+                                                        }
+                                                        if (onSaveMediaClick != null) {
+                                                            Button(
+                                                                onClick = { onSaveMediaClick(message) },
+                                                                colors = ButtonDefaults.buttonColors(
+                                                                    containerColor = emeraldTint,
+                                                                    contentColor = MaterialTheme.colorScheme.onPrimary
+                                                                ),
+                                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                                                modifier = Modifier
+                                                                    .height(32.dp)
+                                                                    .testTag("save_media_btn_${message.id}")
+                                                            ) {
+                                                                Icon(
+                                                                    imageVector = Icons.Default.Download,
+                                                                    contentDescription = null,
+                                                                    modifier = Modifier.size(14.dp)
+                                                                )
+                                                                Spacer(modifier = Modifier.width(4.dp))
+                                                                Text("Save", style = MaterialTheme.typography.labelSmall)
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                             }
 
                                             else -> {
@@ -1025,9 +1138,9 @@ fun MessageBubble(
                             val isPlaying = playingVoiceMessageId == message.id
                             val hasPlayableAudio = message.fileTransfer?.decryptedInMemoryBytes != null
                             Surface(
-                                color = Color.Black.copy(alpha = 0.25f),
+                                color = innerSurfaceColor,
                                 shape = RoundedCornerShape(10.dp),
-                                border = BorderStroke(1.dp, ZeroTraceEmerald.copy(alpha = if (isPlaying) 0.8f else 0.35f)),
+                                border = BorderStroke(1.dp, emeraldTint.copy(alpha = if (isPlaying) 0.8f else 0.35f)),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(bottom = 6.dp)
@@ -1043,8 +1156,8 @@ fun MessageBubble(
                                         onClick = { onVoicePlayToggle?.invoke(message) },
                                         enabled = hasPlayableAudio,
                                         colors = IconButtonDefaults.iconButtonColors(
-                                            containerColor = if (isPlaying) ZeroTraceRed else ZeroTraceEmerald,
-                                            contentColor = if (isPlaying) Color.White else Color.Black
+                                            containerColor = if (isPlaying) ZeroTraceRed else emeraldTint,
+                                            contentColor = if (isPlaying) Color.White else MaterialTheme.colorScheme.onPrimary
                                         ),
                                         modifier = Modifier.size(40.dp)
                                     ) {
@@ -1060,7 +1173,7 @@ fun MessageBubble(
                                             Icon(
                                                 imageVector = Icons.Default.GraphicEq,
                                                 contentDescription = null,
-                                                tint = ZeroTraceEmerald,
+                                                tint = emeraldTint,
                                                 modifier = Modifier.size(16.dp)
                                             )
                                             Spacer(modifier = Modifier.width(4.dp))
@@ -1079,7 +1192,7 @@ fun MessageBubble(
                                                 "Audio chunks unavailable in RAM"
                                             },
                                             style = MonospaceStyle.copy(fontSize = 10.sp),
-                                            color = if (isPlaying) ZeroTraceCyan else MaterialTheme.colorScheme.onSurfaceVariant
+                                            color = if (isPlaying) tealTint else MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
                                 }
@@ -1088,7 +1201,7 @@ fun MessageBubble(
 
                         MessagePayloadKind.CONTACT_CARD -> {
                             Surface(
-                                color = Color.Black.copy(alpha = 0.25f),
+                                color = innerSurfaceColor,
                                 shape = RoundedCornerShape(10.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1101,7 +1214,7 @@ fun MessageBubble(
                                     Icon(
                                         imageVector = Icons.Default.ContactPage,
                                         contentDescription = "Verified Contact Card",
-                                        tint = ZeroTraceCyan
+                                        tint = tealTint
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
@@ -1118,44 +1231,49 @@ fun MessageBubble(
 
                     Text(
                         text = message.bodyText,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface
+                        style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.5.sp),
+                        color = if (message.isOutgoing && ZeroTracePalette.isLight()) {
+                            ZeroTracePalette.mintContent()
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        }
                     )
 
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(4.dp))
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.End,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = if (message.pqBraidAdvanced) {
-                                "Ratchet #${message.ratchetStepIndex} • ML-KEM-1024 Epoch ${message.pqEpoch}"
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = null,
+                            tint = if (message.isOutgoing && ZeroTracePalette.isLight()) {
+                                ZeroTracePalette.mintContent().copy(alpha = 0.75f)
                             } else {
-                                "Ratchet #${message.ratchetStepIndex} • PQ Epoch ${message.pqEpoch}"
+                                MaterialTheme.colorScheme.onSurfaceVariant
                             },
-                            style = MonospaceStyle.copy(fontSize = 9.sp),
-                            color = if (message.pqBraidAdvanced) ZeroTraceCyan else MaterialTheme.colorScheme.onSurfaceVariant
+                            modifier = Modifier.size(10.dp)
                         )
-
-                        Spacer(modifier = Modifier.width(8.dp))
-
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = timeFormatter.format(Date(message.timestampEpochMillis)),
-                                style = MonospaceStyle.copy(fontSize = 9.sp),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            if (message.isOutgoing) {
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Icon(
-                                    imageVector = Icons.Default.DoneAll,
-                                    contentDescription = "Authenticated E2EE Delivered",
-                                    tint = ZeroTraceEmerald,
-                                    modifier = Modifier.size(13.dp)
-                                )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = timeFormatter.format(Date(message.timestampEpochMillis)),
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                            color = if (message.isOutgoing && ZeroTracePalette.isLight()) {
+                                ZeroTracePalette.mintContent().copy(alpha = 0.78f)
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
                             }
+                        )
+                        if (message.isOutgoing) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                imageVector = Icons.Default.DoneAll,
+                                contentDescription = "Authenticated E2EE Delivered",
+                                tint = emeraldTint,
+                                modifier = Modifier.size(13.dp)
+                            )
                         }
                     }
                 }
@@ -1192,6 +1310,28 @@ fun MessageBubble(
                         onReplyClick(message)
                     }
                 )
+                if (message.fileTransfer?.decryptedInMemoryBytes != null) {
+                    if (onMediaPreviewClick != null) {
+                        DropdownMenuItem(
+                            text = { Text("Open / Preview Attachment") },
+                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null) },
+                            onClick = {
+                                actionMenuExpanded = false
+                                onMediaPreviewClick(message)
+                            }
+                        )
+                    }
+                    if (onSaveMediaClick != null) {
+                        DropdownMenuItem(
+                            text = { Text("Save to Gallery / Downloads") },
+                            leadingIcon = { Icon(Icons.Default.Download, contentDescription = null, tint = emeraldTint) },
+                            onClick = {
+                                actionMenuExpanded = false
+                                onSaveMediaClick(message)
+                            }
+                        )
+                    }
+                }
                 DropdownMenuItem(
                     text = { Text("React 🔒 / ⚡ / ✅") },
                     leadingIcon = { Icon(Icons.Default.EmojiEmotions, contentDescription = null) },
@@ -1245,13 +1385,17 @@ fun MessageComposer(
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 6.dp
+        tonalElevation = if (ZeroTracePalette.isLight()) 0.dp else 6.dp
     ) {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 8.dp)
+            modifier = Modifier.fillMaxWidth()
         ) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.55f))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
+            ) {
             AnimatedVisibility(visible = replyingToMessage != null) {
                 if (replyingToMessage != null) {
                     Surface(
@@ -1364,8 +1508,8 @@ fun MessageComposer(
                                     .fillMaxWidth()
                                     .height(4.dp)
                                     .clip(RoundedCornerShape(2.dp)),
-                                color = ZeroTraceEmerald,
-                                trackColor = Color.Black.copy(alpha = 0.35f)
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = MaterialTheme.colorScheme.outline
                             )
                         }
                     }
@@ -1375,8 +1519,8 @@ fun MessageComposer(
                     IconButton(
                         onClick = onToggleVoiceRecording,
                         colors = IconButtonDefaults.iconButtonColors(
-                            containerColor = ZeroTraceEmerald,
-                            contentColor = Color.Black
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
                         ),
                         modifier = Modifier
                             .size(48.dp)
@@ -1439,7 +1583,9 @@ fun MessageComposer(
                         shape = RoundedCornerShape(24.dp),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
+                            unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                            focusedContainerColor = ZeroTracePalette.bubbleInnerCard(),
+                            unfocusedContainerColor = ZeroTracePalette.bubbleInnerCard()
                         )
                     )
 
@@ -1451,7 +1597,7 @@ fun MessageComposer(
                             enabled = canSend,
                             colors = IconButtonDefaults.iconButtonColors(
                                 containerColor = MaterialTheme.colorScheme.primary,
-                                contentColor = Color.Black
+                                contentColor = MaterialTheme.colorScheme.onPrimary
                             ),
                             modifier = Modifier
                                 .size(48.dp)
@@ -1468,7 +1614,7 @@ fun MessageComposer(
                             enabled = canSend,
                             colors = IconButtonDefaults.iconButtonColors(
                                 containerColor = MaterialTheme.colorScheme.primary,
-                                contentColor = Color.Black
+                                contentColor = MaterialTheme.colorScheme.onPrimary
                             ),
                             modifier = Modifier
                                 .size(48.dp)
@@ -1483,6 +1629,7 @@ fun MessageComposer(
                 }
             }
         }
+        }
     }
 }
 
@@ -1496,82 +1643,109 @@ fun AttachmentPicker(
     onDismiss: () -> Unit
 ) {
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(18.dp),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        shadowElevation = if (ZeroTracePalette.isLight()) 4.dp else 0.dp,
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 6.dp)
             .testTag("attachment_picker_sheet")
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(
-                        text = "Encrypted Attachment Transfer",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface
+            Column(modifier = Modifier.padding(16.dp)) {
+                Surface(
+                    color = ZeroTracePalette.mintContainer(),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Shield,
+                            contentDescription = null,
+                            tint = ZeroTracePalette.mintContent(),
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Files are ChaCha20-Poly1305 encrypted before sharing • EXIF stripped",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = ZeroTracePalette.mintContent()
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "Share File",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "E2E Encrypted Transfer • TOR v3 • Max 16 MiB",
+                            style = MonospaceStyle.copy(fontSize = 10.sp),
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "Close Attachment Picker")
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceAround
+                ) {
+                    AttachmentOptionButton(
+                        icon = Icons.Default.Image,
+                        label = "Photos",
+                        tint = MaterialTheme.colorScheme.primary,
+                        tag = "attach_photo_btn",
+                        onClick = onPickPhoto
                     )
-                    Text(
-                        text = "Per-file ChaCha20-Poly1305 256-bit key • 32 KiB chunks • Max 16 MiB • EXIF stripped",
-                        style = MonospaceStyle.copy(fontSize = 10.sp),
-                        color = MaterialTheme.colorScheme.primary
+                    AttachmentOptionButton(
+                        icon = Icons.Default.Videocam,
+                        label = "Videos",
+                        tint = MaterialTheme.colorScheme.secondary,
+                        tag = "attach_video_btn",
+                        onClick = onPickVideo
+                    )
+                    AttachmentOptionButton(
+                        icon = Icons.Default.Description,
+                        label = "Document",
+                        tint = Color(0xFF7C4DFF),
+                        tag = "attach_doc_btn",
+                        onClick = onPickDocument
+                    )
+                    AttachmentOptionButton(
+                        icon = Icons.Default.AudioFile,
+                        label = "Audio",
+                        tint = MaterialTheme.colorScheme.tertiary,
+                        tag = "attach_audio_btn",
+                        onClick = onPickAudio
+                    )
+                    AttachmentOptionButton(
+                        icon = Icons.Default.ContactPage,
+                        label = "Peer Card",
+                        tint = Color(0xFF0284C7),
+                        tag = "attach_contact_btn",
+                        onClick = onPickContactCard
                     )
                 }
-                IconButton(onClick = onDismiss) {
-                    Icon(Icons.Default.Close, contentDescription = "Close Attachment Picker")
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceAround
-            ) {
-                AttachmentOptionButton(
-                    icon = Icons.Default.Image,
-                    label = "Photos",
-                    tint = ZeroTraceEmerald,
-                    tag = "attach_photo_btn",
-                    onClick = onPickPhoto
-                )
-                AttachmentOptionButton(
-                    icon = Icons.Default.Videocam,
-                    label = "Videos",
-                    tint = ZeroTraceCyan,
-                    tag = "attach_video_btn",
-                    onClick = onPickVideo
-                )
-                AttachmentOptionButton(
-                    icon = Icons.Default.Description,
-                    label = "Document",
-                    tint = Color(0xFF7C4DFF),
-                    tag = "attach_doc_btn",
-                    onClick = onPickDocument
-                )
-                AttachmentOptionButton(
-                    icon = Icons.Default.AudioFile,
-                    label = "Audio",
-                    tint = ZeroTraceAmber,
-                    tag = "attach_audio_btn",
-                    onClick = onPickAudio
-                )
-                AttachmentOptionButton(
-                    icon = Icons.Default.ContactPage,
-                    label = "Peer Card",
-                    tint = Color(0xFF40C4FF),
-                    tag = "attach_contact_btn",
-                    onClick = onPickContactCard
-                )
             }
         }
     }
-}
 
 @Composable
 private fun AttachmentOptionButton(
@@ -1745,7 +1919,7 @@ private fun CallControlCircleButton(
             onClick = onClick,
             colors = IconButtonDefaults.iconButtonColors(
                 containerColor = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
-                contentColor = if (active) Color.Black else MaterialTheme.colorScheme.onSurface
+                contentColor = if (active) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
             ),
             modifier = Modifier
                 .size(50.dp)
@@ -1768,27 +1942,19 @@ fun StatusCard(
     onClick: () -> Unit,
     onDeleteClick: (() -> Unit)? = null
 ) {
-    val timeFormatter = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-        shape = RoundedCornerShape(16.dp),
-        border = BorderStroke(
-            width = 1.dp,
-            color = if (statusItem.viewedByLocalUser) {
-                MaterialTheme.colorScheme.outline
-            } else {
-                MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
-            }
-        ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .testTag("status_card_${statusItem.statusId}")
-    ) {
+    val timeFormatter = remember { SimpleDateFormat("hh:mm a", Locale.getDefault()) }
+    val statusKindLabel = when (statusItem.mediaType) {
+        StatusMediaType.IMAGE_CARD -> "PHOTO"
+        StatusMediaType.VIDEO_CARD -> "VIDEO"
+        StatusMediaType.TEXT_CARD -> "TEXT"
+    }
+    Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(14.dp),
+                .clickable(onClick = onClick)
+                .padding(vertical = 10.dp)
+                .testTag("status_card_${statusItem.statusId}"),
             verticalAlignment = Alignment.CenterVertically
         ) {
             ContactAvatar(
@@ -1802,35 +1968,29 @@ fun StatusCard(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = statusItem.authorAlias,
-                        style = MaterialTheme.typography.titleSmall,
+                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Surface(
-                        color = ZeroTraceEmerald.copy(alpha = 0.14f),
+                        color = ZeroTracePalette.mintContainer(),
                         shape = RoundedCornerShape(6.dp)
                     ) {
                         Text(
-                            text = if (statusItem.mediaType == StatusMediaType.IMAGE_CARD) "ENCRYPTED IMAGE" else "P2P RAM STATUS",
-                            style = MonospaceStyle.copy(fontSize = 9.sp),
-                            color = ZeroTraceEmerald,
+                            text = "$statusKindLabel • ${statusItem.remainingHours()}h",
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.5.sp, fontWeight = FontWeight.Bold),
+                            color = ZeroTracePalette.mintContent(),
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                         )
                     }
                 }
-                Spacer(modifier = Modifier.height(3.dp))
+                Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = statusItem.captionText,
+                    text = "${timeFormatter.format(Date(statusItem.createdAtEpochMillis))} • ${statusItem.captionText}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(3.dp))
-                Text(
-                    text = "Shared ${timeFormatter.format(Date(statusItem.createdAtEpochMillis))} • Live Peer RAM Only (No Central Server)",
-                    style = MonospaceStyle.copy(fontSize = 10.sp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
                 )
             }
             if (onDeleteClick != null) {
@@ -1838,11 +1998,23 @@ fun StatusCard(
                     Icon(
                         imageVector = Icons.Default.Delete,
                         contentDescription = "Wipe Status",
-                        tint = ZeroTraceRed
+                        tint = ZeroTraceRed,
+                        modifier = Modifier.size(18.dp)
                     )
                 }
+            } else {
+                Icon(
+                    imageVector = Icons.Default.MoreVert,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
             }
         }
+        HorizontalDivider(
+            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
+            modifier = Modifier.padding(start = 60.dp)
+        )
     }
 }
 
@@ -1902,7 +2074,7 @@ fun EmptyState(
                     onClick = onPrimaryAction,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = Color.Black
+                        contentColor = MaterialTheme.colorScheme.onPrimary
                     )
                 ) {
                     Text(primaryActionLabel, fontWeight = FontWeight.Bold)
@@ -2042,7 +2214,7 @@ fun SecurityInformationCard(
             Text(
                 text = "Network: $torRoutingNote",
                 style = MonospaceStyle.copy(fontSize = 11.sp),
-                color = ZeroTraceCyan
+                color = MaterialTheme.colorScheme.secondary
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
