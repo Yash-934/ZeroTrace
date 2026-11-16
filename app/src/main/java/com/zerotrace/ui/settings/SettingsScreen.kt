@@ -61,6 +61,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -134,7 +135,7 @@ fun ZeroTraceSettingsScreen(
     val context = LocalContext.current
     val isHi = language == AppLanguage.HINDI
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
-    var showEditProfileDialog by remember { mutableStateOf(false) }
+    var showEditProfileDialog by rememberSaveable { mutableStateOf(false) }
     val biometricCapability = remember { BiometricAuthHelper.checkCapability(context) }
 
     val chipColors = FilterChipDefaults.filterChipColors(
@@ -976,8 +977,8 @@ private fun EditLocalProfileDialog(
     val context = LocalContext.current
     var nameDraft by remember { mutableStateOf(initialProfile.displayName) }
     var bioDraft by remember { mutableStateOf(initialProfile.bio) }
-    var pickedAvatarUri by remember { mutableStateOf<Uri?>(null) }
-    var removePhoto by remember { mutableStateOf(false) }
+    var pickedAvatarUri by rememberSaveable { mutableStateOf<Uri?>(null) }
+    var removePhoto by rememberSaveable { mutableStateOf(false) }
 
     val mediaPicker = rememberSafeMediaPicker(
         onImagePicked = { uri ->
