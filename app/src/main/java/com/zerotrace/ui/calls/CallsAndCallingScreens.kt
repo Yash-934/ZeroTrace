@@ -216,10 +216,10 @@ fun ZeroTraceCallsTabScreen(
                                 selected = isSelected,
                                 onClick = { onFilterChange(filter) },
                                 colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = MaterialTheme.colorScheme.primary,
-                                    selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
+                                    selectedContainerColor = ZeroTracePalette.activePillContainer(),
+                                    selectedLabelColor = ZeroTracePalette.activePillContent(),
                                     containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                    labelColor = MaterialTheme.colorScheme.onSurface
+                                    labelColor = MaterialTheme.colorScheme.onSurfaceVariant
                                 ),
                                 border = null,
                                 shape = RoundedCornerShape(50),
@@ -469,7 +469,7 @@ fun ZeroTraceVoiceCallScreen(
                     ) {
                         Text(
                             text = "TOR-TCP VOICE STREAM • ZERO STUN/UDP LEAKS",
-                            style = MonospaceStyle.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                             color = AmberWarning,
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
                         )
@@ -479,14 +479,14 @@ fun ZeroTraceVoiceCallScreen(
                         Icon(
                             imageVector = Icons.Default.Lock,
                             contentDescription = null,
-                            tint = Color(0xFF00E676),
+                            tint = Color(0xFF25D366),
                             modifier = Modifier.size(15.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = "End-to-End Encrypted • Safety: ${callState.peerSafetyDigits.take(19)}",
-                            style = MonospaceStyle.copy(fontSize = 11.sp),
-                            color = Color(0xFF00E676)
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF25D366)
                         )
                     }
                 }
@@ -509,7 +509,7 @@ fun ZeroTraceVoiceCallScreen(
                     Text(
                         text = callState.peerOnion,
                         style = MonospaceStyle.copy(fontSize = 11.sp),
-                        color = Color(0xFF97F0FF)
+                        color = Color(0xFF8696A0)
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
@@ -520,13 +520,13 @@ fun ZeroTraceVoiceCallScreen(
                             CallProtocolState.CONNECTED_ENCRYPTED_TOR_STREAM -> formatCallDuration(callState.elapsedSeconds)
                             else -> callState.protocolState.name
                         },
-                        style = MonospaceStyle.copy(fontSize = 16.sp, fontWeight = FontWeight.Bold),
-                        color = Color(0xFF00E676)
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = Color(0xFF25D366)
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Rx Audio: ${callState.remoteAudioPacketsReceived} AEAD frames • ChaCha20-Poly1305",
-                        style = MonospaceStyle.copy(fontSize = 11.sp),
+                        text = "Rx Audio: ${callState.remoteAudioPacketsReceived} frames • ChaCha20-Poly1305",
+                        style = MaterialTheme.typography.labelSmall,
                         color = Color.White.copy(alpha = 0.72f),
                         textAlign = TextAlign.Center
                     )
@@ -549,7 +549,7 @@ fun ZeroTraceVoiceCallScreen(
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
                                     text = "${callState.peerAlias} muted microphone",
-                                    style = MonospaceStyle.copy(fontSize = 10.sp),
+                                    style = MaterialTheme.typography.labelSmall,
                                     color = AmberWarning
                                 )
                             }
@@ -768,7 +768,7 @@ fun ZeroTraceVideoCallScreen(
                                 .fillMaxSize()
                                 .background(
                                     Brush.radialGradient(
-                                        listOf(Color(0xFF0E2920), Color(0xFF06080C))
+                                        listOf(Color(0xFF111B21), Color(0xFF0B141A))
                                     )
                                 )
                                 .padding(20.dp),
@@ -798,15 +798,15 @@ fun ZeroTraceVideoCallScreen(
                                         "Connecting peer video frames • ${formatCallDuration(callState.elapsedSeconds)}"
                                     }
                                 },
-                                style = MonospaceStyle.copy(fontSize = 12.sp),
-                                color = Color(0xFF00E676)
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFF25D366)
                             )
                         }
                     }
 
                     // Top-Left Tor Circuit Pill Overlay matching Mockup
                     Surface(
-                        color = Color.White.copy(alpha = 0.90f),
+                        color = Color.White.copy(alpha = 0.92f),
                         shape = RoundedCornerShape(50),
                         modifier = Modifier
                             .align(Alignment.TopStart)
@@ -819,22 +819,22 @@ fun ZeroTraceVideoCallScreen(
                             Text(
                                 text = "TOR v3 • Circuit Active",
                                 style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFF111827)
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF111B21)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Box(
                                 modifier = Modifier
                                     .size(8.dp)
                                     .clip(CircleShape)
-                                    .background(Color(0xFF00B86B))
+                                    .background(Color(0xFF1DAA61))
                             )
                         }
                     }
 
                     // Bottom-Right Floating Self-Preview Window matching Mockup Screen 3
                     Surface(
-                        color = Color(0xFF101920),
+                        color = Color(0xFF111B21),
                         shape = RoundedCornerShape(14.dp),
                         border = BorderStroke(1.5.dp, Color.White.copy(alpha = 0.85f)),
                         modifier = Modifier
@@ -861,12 +861,12 @@ fun ZeroTraceVideoCallScreen(
                                     Icon(
                                         imageVector = Icons.Default.Videocam,
                                         contentDescription = "Local Camera Preview",
-                                        tint = if (callState.isCameraEnabled) Color(0xFF00E676) else CrimsonDanger
+                                        tint = if (callState.isCameraEnabled) Color(0xFF25D366) else CrimsonDanger
                                     )
                                     Spacer(modifier = Modifier.height(6.dp))
                                     Text(
                                         text = if (!callState.isCameraEnabled) "Camera Off" else "Camera Perm\nRequired",
-                                        style = MonospaceStyle.copy(fontSize = 9.sp),
+                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
                                         color = Color.White,
                                         textAlign = TextAlign.Center
                                     )
@@ -986,19 +986,19 @@ fun ZeroTraceIncomingCallScreen(
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.VerifiedUser, contentDescription = null, tint = Color(0xFF00E676))
+                        Icon(Icons.Default.VerifiedUser, contentDescription = null, tint = Color(0xFF25D366))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "INCOMING AUTHENTICATED TOR ${callState.mediaKind.name} CALL",
-                            style = MonospaceStyle.copy(fontSize = 12.sp, fontWeight = FontWeight.Bold),
-                            color = Color(0xFF00E676)
+                            text = "INCOMING ENCRYPTED ${callState.mediaKind.name} CALL",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = Color(0xFF25D366)
                         )
                     }
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
                         text = "Dual Ed25519 + ML-DSA-87 Caller Signature Verified",
-                        style = MonospaceStyle.copy(fontSize = 11.sp),
-                        color = Color(0xFF97F0FF)
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFFD1D7DB)
                     )
                 }
 
@@ -1018,12 +1018,12 @@ fun ZeroTraceIncomingCallScreen(
                     Text(
                         text = callState.peerOnion,
                         style = MonospaceStyle.copy(fontSize = 11.sp),
-                        color = Color(0xFF97F0FF)
+                        color = Color(0xFF8696A0)
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = "Safety Number: ${callState.peerSafetyDigits}",
-                        style = MonospaceStyle.copy(fontSize = 11.sp),
+                        style = MaterialTheme.typography.labelSmall,
                         color = Color.White.copy(alpha = 0.8f)
                     )
                 }

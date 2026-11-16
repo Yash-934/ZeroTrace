@@ -270,10 +270,10 @@ fun ZeroTraceHomeScreen(
                                 )
                             },
                             colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primary,
-                                selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
+                                selectedContainerColor = ZeroTracePalette.activePillContainer(),
+                                selectedLabelColor = ZeroTracePalette.activePillContent(),
                                 containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                labelColor = MaterialTheme.colorScheme.onSurface
+                                labelColor = MaterialTheme.colorScheme.onSurfaceVariant
                             ),
                             modifier = Modifier
                                 .height(34.dp)

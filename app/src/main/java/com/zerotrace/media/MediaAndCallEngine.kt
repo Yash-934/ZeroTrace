@@ -664,7 +664,7 @@ object EncryptedCallMediaEngine {
             try {
                 srv.soTimeout = 45_000
                 val client = srv.accept()
-                attachDirectMediaSocket(client)
+                attachDirectMediaSocket(client, callId)
             } catch (_: Throwable) {
             }
         }
@@ -702,6 +702,12 @@ object EncryptedCallMediaEngine {
         _remoteVideoFrame.value = null
         isActive.set(true)
 
+        // If caller accepted direct TCP media socket before activateMediaSession finished, ensure reader is alive
+        val existingSock = mediaClientSocket
+        if (existingSock != null && !existingSock.isClosed && readerJob?.isActive != true) {
+            attachDirectMediaSocket(existingSock, callId)
+        }
+
         appAudioManager = (context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager)?.also { am ->
             try {
                 am.mode = AudioManager.MODE_IN_COMMUNICATION
@@ -724,7 +730,7 @@ object EncryptedCallMediaEngine {
                     val sock = Socket()
                     sock.tcpNoDelay = true
                     sock.connect(InetSocketAddress(remoteHost, remoteMediaPort), 1800)
-                    attachDirectMediaSocket(sock)
+                    attachDirectMediaSocket(sock, callId)
                 } catch (_: Throwable) {
                     // Dedicated port blocked -> seamlessly continues via prioritized encrypted fallback frame
                 }
@@ -748,22 +754,35 @@ object EncryptedCallMediaEngine {
     }
 
     @Synchronized
-    private fun attachDirectMediaSocket(sock: Socket) {
-        if (!isActive.get() && activeCallId == null) {
+    private fun attachDirectMediaSocket(sock: Socket, expectedCallId: String) {
+        if (activeCallId != expectedCallId) {
             try {
                 sock.close()
             } catch (_: Throwable) {
             }
             return
         }
+        val prevSock = mediaClientSocket
+        if (prevSock != null && prevSock !== sock) {
+            try {
+                prevSock.close()
+            } catch (_: Throwable) {
+            }
+        }
         mediaClientSocket = sock
         sock.tcpNoDelay = true
+        sock.soTimeout = 0
         mediaOut = DataOutputStream(BufferedOutputStream(sock.getOutputStream(), 16_384))
         val inp = DataInputStream(BufferedInputStream(sock.getInputStream(), 16_384))
         readerJob?.cancel()
         readerJob = scope.launch {
             try {
-                while (isActive.get() && !sock.isClosed) {
+                // Wait up to 15s for activateMediaSession to derive callMediaKey32 & flip isActive=true
+                val waitDeadline = System.currentTimeMillis() + 15_000L
+                while (activeCallId == expectedCallId && !isActive.get() && !sock.isClosed && System.currentTimeMillis() < waitDeadline) {
+                    delay(15L)
+                }
+                while (activeCallId == expectedCallId && isActive.get() && !sock.isClosed) {
                     val len = inp.readInt()
                     if (len <= 0 || len > 512_000) break
                     val frameBytes = ByteArray(len)
@@ -771,6 +790,15 @@ object EncryptedCallMediaEngine {
                     processIncomingEncryptedMediaFrame(frameBytes)
                 }
             } catch (_: Throwable) {
+            } finally {
+                if (mediaClientSocket === sock) {
+                    mediaOut = null
+                    mediaClientSocket = null
+                }
+                try {
+                    sock.close()
+                } catch (_: Throwable) {
+                }
             }
         }
     }

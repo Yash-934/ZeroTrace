@@ -2052,32 +2052,9 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         val current = _uiState.value.activeCallState ?: return
         if (current.callId != event.callId) return
         val localPriv = pendingCallPrivKey32 ?: return
-        val handle = TorOnionTransportManager.getActiveRealPeerSessionHandle(event.peerOnion)
-            ?: _uiState.value.activeSessionHandle
-        val sessionIdHex = handle?.let { RustCoreBridge.getSessionMetrics(it)?.sessionIdHex } ?: event.callId
-
-        val derivedKey32 = EncryptedCallMediaEngine.deriveCallMediaKey32(
-            localPriv32 = localPriv,
-            remotePub32 = event.ephemeralCallPubKey,
-            sessionIdHex = sessionIdHex,
-            callId = event.callId
-        )
-        Arrays.fill(localPriv, 0.toByte())
         pendingCallPrivKey32 = null
 
-        EncryptedCallMediaEngine.activateMediaSession(
-            context = appContext,
-            callId = event.callId,
-            isCaller = true,
-            derivedKey32 = derivedKey32,
-            isVideoCall = current.isCameraEnabled,
-            remoteHost = null,
-            remoteMediaPort = null,
-            onFallbackFrameSend = { frame ->
-                TorOnionTransportManager.sendCallMediaFallbackFrame(event.peerOnion, event.callId, frame)
-            }
-        )
-        Arrays.fill(derivedKey32, 0.toByte())
+        val sessionIdHex = event.callId
 
         _uiState.update { state ->
             state.copy(
@@ -2086,6 +2063,31 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             )
         }
+
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val derivedKey32 = EncryptedCallMediaEngine.deriveCallMediaKey32(
+                localPriv32 = localPriv,
+                remotePub32 = event.ephemeralCallPubKey,
+                sessionIdHex = sessionIdHex,
+                callId = event.callId
+            )
+            Arrays.fill(localPriv, 0.toByte())
+
+            EncryptedCallMediaEngine.activateMediaSession(
+                context = appContext,
+                callId = event.callId,
+                isCaller = true,
+                derivedKey32 = derivedKey32,
+                isVideoCall = current.isCameraEnabled,
+                remoteHost = null,
+                remoteMediaPort = null,
+                onFallbackFrameSend = { frame ->
+                    TorOnionTransportManager.sendCallMediaFallbackFrame(event.peerOnion, event.callId, frame)
+                }
+            )
+            Arrays.fill(derivedKey32, 0.toByte())
+        }
+
         callTimerJob?.cancel()
         callTimerJob = viewModelScope.launch {
             runCallTimerAndTelemetryLoop(event.callId)
@@ -2125,9 +2127,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         val remotePort = pendingIncomingMediaPort
 
         val (ephemPriv, ephemPub) = EncryptedCallMediaEngine.generateEphemeralX25519KeyPair()
-        val handle = TorOnionTransportManager.getActiveRealPeerSessionHandle(call.peerOnion)
-            ?: _uiState.value.activeSessionHandle
-        val sessionIdHex = handle?.let { RustCoreBridge.getSessionMetrics(it)?.sessionIdHex } ?: call.callId
+        val sessionIdHex = call.callId
 
         val connected = call.copy(protocolState = CallProtocolState.CONNECTED_ENCRYPTED_TOR_STREAM)
         _uiState.update {
@@ -2142,6 +2142,13 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         }
 
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            TorOnionTransportManager.sendCallAccept(
+                peerOnion = call.peerOnion,
+                callId = call.callId,
+                mediaKind = call.mediaKind,
+                ephemeralCallPubKey = ephemPub
+            )
+
             if (remoteEphemPub != null) {
                 val key32 = EncryptedCallMediaEngine.deriveCallMediaKey32(
                     localPriv32 = ephemPriv,
@@ -2165,13 +2172,6 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             }
             Arrays.fill(ephemPriv, 0.toByte())
             pendingIncomingRemoteEphemPub = null
-
-            TorOnionTransportManager.sendCallAccept(
-                peerOnion = call.peerOnion,
-                callId = call.callId,
-                mediaKind = call.mediaKind,
-                ephemeralCallPubKey = ephemPub
-            )
         }
 
         callTimerJob?.cancel()

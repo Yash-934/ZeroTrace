@@ -115,6 +115,7 @@ import com.zerotrace.bridge.TransferLifecycleState
 import com.zerotrace.bridge.VerifiedContactRecord
 import com.zerotrace.network.ConnectivityState
 import com.zerotrace.ui.theme.MonospaceStyle
+import com.zerotrace.ui.theme.WhatsAppReadTickBlue
 import com.zerotrace.ui.theme.ZeroTraceAmber
 import com.zerotrace.ui.theme.ZeroTraceEmerald
 import com.zerotrace.ui.theme.ZeroTracePalette
@@ -191,8 +192,12 @@ fun ZeroTraceTopBar(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = title,
-                            style = MaterialTheme.typography.titleLarge.copy(fontSize = 21.sp, fontWeight = FontWeight.Bold),
-                            color = MaterialTheme.colorScheme.onSurface,
+                            style = MaterialTheme.typography.titleLarge.copy(fontSize = 22.sp, fontWeight = FontWeight.Bold),
+                            color = if (onBackClick == null && ZeroTracePalette.isLight()) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
                             maxLines = 1,
                             softWrap = false,
                             overflow = TextOverflow.Ellipsis
@@ -335,18 +340,18 @@ fun ZeroTraceBottomNavigation(
     val isLight = ZeroTracePalette.isLight()
     Surface(
         color = MaterialTheme.colorScheme.surface,
-        tonalElevation = if (isLight) 0.dp else 6.dp,
+        tonalElevation = if (isLight) 0.dp else 4.dp,
         modifier = Modifier
             .fillMaxWidth()
             .testTag("zerotrace_bottom_nav")
     ) {
         Column(modifier = Modifier.navigationBarsPadding()) {
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    .padding(horizontal = 6.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 MainBottomTab.entries.forEach { tab ->
@@ -357,69 +362,68 @@ fun ZeroTraceBottomNavigation(
                         MainBottomTab.SETTINGS -> 0
                     }
                     val selected = selectedTab == tab
-                    val pillContainer = when {
-                        selected -> MaterialTheme.colorScheme.primary
-                        isLight -> Color(0xFF6B7280)
-                        else -> MaterialTheme.colorScheme.surfaceVariant
-                    }
-                    val pillContent = when {
-                        selected -> MaterialTheme.colorScheme.onPrimary
-                        isLight -> Color.White
-                        else -> MaterialTheme.colorScheme.onSurfaceVariant
-                    }
-                    Surface(
-                        color = pillContainer,
-                        shape = RoundedCornerShape(50),
+                    val activePillBg = ZeroTracePalette.activePillContainer()
+                    val activeTint = ZeroTracePalette.activePillContent()
+                    val inactiveTint = MaterialTheme.colorScheme.onSurfaceVariant
+
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
                         modifier = Modifier
                             .weight(1f)
-                            .height(38.dp)
-                            .clip(RoundedCornerShape(50))
+                            .clip(RoundedCornerShape(14.dp))
                             .clickable { onTabSelected(tab) }
+                            .padding(vertical = 4.dp)
                             .testTag(tab.tag)
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            Icon(
-                                imageVector = tab.icon,
-                                contentDescription = if (isHindi) tab.labelHi else tab.labelEn,
-                                tint = pillContent,
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = if (isHindi) tab.labelHi else tab.labelEn,
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    fontSize = 11.sp,
-                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.SemiBold
-                                ),
-                                color = pillContent,
-                                maxLines = 1,
-                                softWrap = false,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                        Box(contentAlignment = Alignment.Center) {
+                            Box(
+                                modifier = Modifier
+                                    .width(56.dp)
+                                    .height(30.dp)
+                                    .clip(RoundedCornerShape(50))
+                                    .background(if (selected) activePillBg else Color.Transparent),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = tab.icon,
+                                    contentDescription = if (isHindi) tab.labelHi else tab.labelEn,
+                                    tint = if (selected) activeTint else inactiveTint,
+                                    modifier = Modifier.size(21.dp)
+                                )
+                            }
                             if (badgeCount > 0) {
-                                Spacer(modifier = Modifier.width(3.dp))
                                 Box(
                                     modifier = Modifier
+                                        .align(Alignment.TopEnd)
                                         .size(16.dp)
                                         .clip(CircleShape)
-                                        .background(if (selected) Color.White else MaterialTheme.colorScheme.primary),
+                                        .background(MaterialTheme.colorScheme.primary),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Text(
                                         text = badgeCount.coerceAtMost(9).toString(),
                                         style = MaterialTheme.typography.labelSmall.copy(
-                                            fontSize = 9.sp,
+                                            fontSize = 9.5.sp,
                                             fontWeight = FontWeight.Bold
                                         ),
-                                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onPrimary
+                                        color = Color.White
                                     )
                                 }
                             }
                         }
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = if (isHindi) tab.labelHi else tab.labelEn,
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontSize = 11.5.sp,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                            ),
+                            color = if (selected) MaterialTheme.colorScheme.onSurface else inactiveTint,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
             }
@@ -495,12 +499,12 @@ fun ContactAvatar(
     modifier: Modifier = Modifier
 ) {
     val avatarColors = listOf(
-        Color(0xFF00E676),
-        Color(0xFF00B8D4),
-        Color(0xFF7C4DFF),
-        Color(0xFFFF9100),
-        Color(0xFF1DE9B6),
-        Color(0xFF40C4FF)
+        Color(0xFF00A884),
+        Color(0xFF0284C7),
+        Color(0xFF6D28D9),
+        Color(0xFFD97706),
+        Color(0xFF0F766E),
+        Color(0xFF2563EB)
     )
     val colorIndex = kotlin.math.abs(onionAddress.hashCode()) % avatarColors.size
     val baseColor = avatarColors[colorIndex]
@@ -1005,8 +1009,8 @@ fun MessageBubble(
                                             )
                                             if (transfer != null) {
                                                 Text(
-                                                    text = "${(transfer.manifest.totalSizeBytes / 1024).coerceAtLeast(1)} KiB • ${transfer.manifest.totalChunks} AEAD Chunks • SHA-256",
-                                                    style = MonospaceStyle.copy(fontSize = 10.sp),
+                                                    text = "${(transfer.manifest.totalSizeBytes / 1024).coerceAtLeast(1)} KiB • ${transfer.manifest.totalChunks} Chunks • SHA-256",
+                                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp),
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
                                             }
@@ -1061,15 +1065,15 @@ fun MessageBubble(
                                                 )
                                                 Text(
                                                     text = "${transfer.state.name} (${transfer.chunksProcessed}/${transfer.manifest.totalChunks})",
-                                                    style = MonospaceStyle.copy(fontSize = 10.sp),
+                                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp),
                                                     color = tealTint
                                                 )
                                             }
 
                                             TransferLifecycleState.VERIFIED_READY_IN_RAM -> {
                                                 Text(
-                                                    text = "✓ ChaCha20-Poly1305 Verified (${transfer.manifest.sha256DigestHex.take(10)}…)",
-                                                    style = MonospaceStyle.copy(fontSize = 10.sp),
+                                                    text = "✓ ChaCha20-Poly1305 Verified",
+                                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp),
                                                     color = emeraldTint
                                                 )
                                                 if (decryptedBytes != null && (onMediaPreviewClick != null || onSaveMediaClick != null)) {
@@ -1185,13 +1189,13 @@ fun MessageBubble(
                                         }
                                         Text(
                                             text = if (isPlaying) {
-                                                "Playing decrypted RAM PCM stream…"
+                                                "Playing decrypted voice note…"
                                             } else if (hasPlayableAudio) {
-                                                "Tap Play • ChaCha20-Poly1305 WAV (RAM)"
+                                                "Tap Play • Encrypted Voice (RAM)"
                                             } else {
                                                 "Audio chunks unavailable in RAM"
                                             },
-                                            style = MonospaceStyle.copy(fontSize = 10.sp),
+                                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp),
                                             color = if (isPlaying) tealTint else MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
@@ -1231,7 +1235,7 @@ fun MessageBubble(
 
                     Text(
                         text = message.bodyText,
-                        style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.5.sp),
+                        style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp),
                         color = if (message.isOutgoing && ZeroTracePalette.isLight()) {
                             ZeroTracePalette.mintContent()
                         } else {
@@ -1239,7 +1243,7 @@ fun MessageBubble(
                         }
                     )
 
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(3.dp))
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1249,30 +1253,22 @@ fun MessageBubble(
                         Icon(
                             imageVector = Icons.Default.Lock,
                             contentDescription = null,
-                            tint = if (message.isOutgoing && ZeroTracePalette.isLight()) {
-                                ZeroTracePalette.mintContent().copy(alpha = 0.75f)
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(10.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
                             text = timeFormatter.format(Date(message.timestampEpochMillis)),
-                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                            color = if (message.isOutgoing && ZeroTracePalette.isLight()) {
-                                ZeroTracePalette.mintContent().copy(alpha = 0.78f)
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            }
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5.sp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         if (message.isOutgoing) {
                             Spacer(modifier = Modifier.width(4.dp))
                             Icon(
                                 imageVector = Icons.Default.DoneAll,
                                 contentDescription = "Authenticated E2EE Delivered",
-                                tint = emeraldTint,
-                                modifier = Modifier.size(13.dp)
+                                tint = WhatsAppReadTickBlue,
+                                modifier = Modifier.size(15.dp)
                             )
                         }
                     }

@@ -14,49 +14,52 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import com.example.R
 
-val ObsidianBg = Color(0xFF070B0E)
-val CharcoalSurface = Color(0xFF0E151B)
-val ElevatedCarbon = Color(0xFF162029)
-val OutgoingBubbleDark = Color(0xFF063B27)
-val IncomingBubbleDark = Color(0xFF18232C)
-val BorderSlate = Color(0xFF22303C)
-val EmeraldPrimary = Color(0xFF00E676)
-val EmeraldDim = Color(0xFF00A854)
-val EmeraldContainer = Color(0xFF07291A)
-val CyanAccent = Color(0xFF18FFFF)
-val AmberWarning = Color(0xFFFFB300)
-val CrimsonDanger = Color(0xFFFF5252)
-val TextPrimary = Color(0xFFECEFF4)
-val TextSecondary = Color(0xFF94A3B8)
+val ObsidianBg = Color(0xFF0B141A)
+val CharcoalSurface = Color(0xFF111B21)
+val ElevatedCarbon = Color(0xFF202C33)
+val OutgoingBubbleDark = Color(0xFF005C4B)
+val IncomingBubbleDark = Color(0xFF202C33)
+val BorderSlate = Color(0xFF222E35)
+val EmeraldPrimary = Color(0xFF00A884)
+val EmeraldDim = Color(0xFF008069)
+val EmeraldContainer = Color(0xFF005C4B)
+val CyanAccent = Color(0xFF008069)
+val AmberWarning = Color(0xFFD97706)
+val CrimsonDanger = Color(0xFFEF4444)
+val TextPrimary = Color(0xFFE9EDEF)
+val TextSecondary = Color(0xFF8696A0)
 
 // Aliases used by ZeroTraceComponents
-val ZeroTraceEmerald = EmeraldPrimary
+val ZeroTraceEmerald = Color(0xFF1DAA61)
 val ZeroTraceCyan = CyanAccent
 val ZeroTraceAmber = AmberWarning
 val ZeroTraceRed = CrimsonDanger
 val ZeroTraceOutgoingBubble = OutgoingBubbleDark
 val ZeroTraceSurfaceElevated = IncomingBubbleDark
+val WhatsAppReadTickBlue = Color(0xFF53BDEB)
+val WhatsAppGreenPillBgLight = Color(0xFFD8FDD2)
+val WhatsAppGreenPillTextLight = Color(0xFF0A5C36)
 
 enum class AppThemeMode(val labelEn: String, val labelHi: String) {
     LIGHT("Light (Default)", "लाइट (डिफ़ॉल्ट)"),
-    DARK("Dark (Obsidian)", "डार्क (ऑब्सीडियन)"),
+    DARK("Dark (WhatsApp)", "डार्क (व्हाट्सएप)"),
     SYSTEM("System Default", "सिस्टम डिफ़ॉल्ट");
 
     val label: String get() = labelEn
 }
 
 enum class AccentPalette(val labelEn: String, val primaryColor: Color, val containerColor: Color) {
-    EMERALD("ZeroTrace Emerald", Color(0xFF00E676), Color(0xFF07291A)),
-    CYBER_TEAL("Quantum Teal", Color(0xFF00BFA5), Color(0xFF052925)),
-    NEON_CYAN("Onion Cyan", Color(0xFF00E5FF), Color(0xFF05262E));
+    EMERALD("WhatsApp Green", Color(0xFF00A884), Color(0xFF005C4B)),
+    CYBER_TEAL("Classic Teal", Color(0xFF008069), Color(0xFF004D40)),
+    NEON_CYAN("Ocean Blue", Color(0xFF0284C7), Color(0xFF073B59));
 
     val label: String get() = labelEn
 }
 
 enum class ChatWallpaperStyle(val labelEn: String, val bgColorDark: Color, val bgColorLight: Color) {
-    OBSIDIAN_GRID("Clean Slate", Color(0xFF070B0E), Color(0xFFF5F7F9)),
-    DEEP_EMERALD_MESH("Encrypted Forest", Color(0xFF05130D), Color(0xFFECFDF5)),
-    PURE_BLACK_AMOLED("Pure Contrast", Color(0xFF000000), Color(0xFFFFFFFF));
+    OBSIDIAN_GRID("WhatsApp Classic", Color(0xFF0B141A), Color(0xFFEFEAE2)),
+    DEEP_EMERALD_MESH("Encrypted Mint", Color(0xFF061A14), Color(0xFFE5F6EC)),
+    PURE_BLACK_AMOLED("Clean Light / AMOLED", Color(0xFF000000), Color(0xFFF5F7F9));
 
     val label: String get() = labelEn
 }
@@ -68,13 +71,19 @@ object ZeroTracePalette {
         MaterialTheme.colorScheme.background.blue > 0.5f
 
     @Composable
-    fun outgoingBubble(): Color = if (isLight()) Color(0xFFC2F8D0) else OutgoingBubbleDark
+    fun outgoingBubble(): Color = if (isLight()) Color(0xFFD9FDD3) else OutgoingBubbleDark
 
     @Composable
     fun incomingBubble(): Color = if (isLight()) Color.White else IncomingBubbleDark
 
     @Composable
-    fun bubbleInnerCard(): Color = if (isLight()) Color(0xFFF3F5F7) else Color.Black.copy(alpha = 0.25f)
+    fun bubbleInnerCard(): Color = if (isLight()) Color(0xFFF0F2F5) else Color(0xFF182229)
+
+    @Composable
+    fun activePillContainer(): Color = if (isLight()) WhatsAppGreenPillBgLight else OutgoingBubbleDark
+
+    @Composable
+    fun activePillContent(): Color = if (isLight()) WhatsAppGreenPillTextLight else Color(0xFFE9EDEF)
 
     @Composable
     fun accentEmerald(): Color = MaterialTheme.colorScheme.primary
@@ -119,81 +128,80 @@ val MonospaceStyle = TextStyle(
     lineHeight = 16.sp
 )
 
+// Original WhatsApp clean sans-serif typography across all headers, body, subtitles, chips & timestamps
 val ZeroTraceTypography = Typography(
     headlineLarge = TextStyle(
-        fontFamily = SpaceGroteskFamily,
+        fontFamily = InterFamily,
         fontWeight = FontWeight.Bold,
-        fontSize = 26.sp,
-        lineHeight = 32.sp,
-        letterSpacing = (-0.4).sp
+        fontSize = 25.sp,
+        lineHeight = 31.sp,
+        letterSpacing = (-0.3).sp
     ),
     headlineMedium = TextStyle(
-        fontFamily = SpaceGroteskFamily,
+        fontFamily = InterFamily,
         fontWeight = FontWeight.Bold,
         fontSize = 21.sp,
         lineHeight = 27.sp
     ),
     headlineSmall = TextStyle(
-        fontFamily = SpaceGroteskFamily,
-        fontWeight = FontWeight.Bold,
+        fontFamily = InterFamily,
+        fontWeight = FontWeight.SemiBold,
         fontSize = 19.sp,
         lineHeight = 25.sp
     ),
     titleLarge = TextStyle(
-        fontFamily = SpaceGroteskFamily,
+        fontFamily = InterFamily,
         fontWeight = FontWeight.Bold,
-        fontSize = 18.sp,
-        lineHeight = 24.sp,
-        letterSpacing = 0.15.sp
+        fontSize = 20.sp,
+        lineHeight = 26.sp
     ),
     titleMedium = TextStyle(
         fontFamily = InterFamily,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 15.5.sp,
-        lineHeight = 21.sp
+        fontSize = 16.sp,
+        lineHeight = 22.sp
     ),
     titleSmall = TextStyle(
         fontFamily = InterFamily,
         fontWeight = FontWeight.SemiBold,
         fontSize = 14.sp,
-        lineHeight = 19.sp
+        lineHeight = 20.sp
     ),
     bodyLarge = TextStyle(
         fontFamily = InterFamily,
         fontWeight = FontWeight.Normal,
-        fontSize = 15.sp,
+        fontSize = 15.5.sp,
         lineHeight = 21.sp
     ),
     bodyMedium = TextStyle(
         fontFamily = InterFamily,
         fontWeight = FontWeight.Normal,
-        fontSize = 13.5.sp,
-        lineHeight = 19.sp
+        fontSize = 14.5.sp,
+        lineHeight = 20.sp
     ),
     bodySmall = TextStyle(
         fontFamily = InterFamily,
         fontWeight = FontWeight.Normal,
-        fontSize = 12.sp,
+        fontSize = 12.5.sp,
         lineHeight = 17.sp
     ),
     labelLarge = TextStyle(
-        fontFamily = SpaceGroteskFamily,
-        fontWeight = FontWeight.Bold,
-        fontSize = 13.sp,
-        lineHeight = 18.sp,
-        letterSpacing = 0.4.sp
+        fontFamily = InterFamily,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 13.5.sp,
+        lineHeight = 18.sp
     ),
     labelMedium = TextStyle(
-        fontFamily = JetBrainsMonoFamily,
+        fontFamily = InterFamily,
         fontWeight = FontWeight.Medium,
-        fontSize = 11.5.sp,
+        fontSize = 12.sp,
         lineHeight = 16.sp
     ),
     labelSmall = TextStyle(
-        fontFamily = JetBrainsMonoFamily,
+        fontFamily = InterFamily,
         fontWeight = FontWeight.Normal,
-        fontSize = 10.5.sp,
-        lineHeight = 14.sp
+        fontSize = 11.sp,
+        lineHeight = 15.sp
     )
 )
 
@@ -210,21 +218,21 @@ fun ZeroTraceTheme(
     }
 
     val lightPrimary = when (accentPalette) {
-        AccentPalette.EMERALD -> Color(0xFF00C15B)
-        AccentPalette.CYBER_TEAL -> Color(0xFF00897B)
+        AccentPalette.EMERALD -> Color(0xFF1DAA61)
+        AccentPalette.CYBER_TEAL -> Color(0xFF008069)
         AccentPalette.NEON_CYAN -> Color(0xFF0284C7)
     }
 
     val colorScheme = if (useDark) {
         darkColorScheme(
             primary = accentPalette.primaryColor,
-            onPrimary = Color(0xFF03180D),
+            onPrimary = Color(0xFF062018),
             primaryContainer = accentPalette.containerColor,
-            onPrimaryContainer = Color(0xFF99F6C6),
-            secondary = CyanAccent,
-            onSecondary = Color(0xFF002022),
-            secondaryContainer = Color(0xFF0D2B33),
-            onSecondaryContainer = Color(0xFF97F0FF),
+            onPrimaryContainer = Color(0xFFE9EDEF),
+            secondary = Color(0xFF00A884),
+            onSecondary = Color(0xFF062018),
+            secondaryContainer = Color(0xFF182229),
+            onSecondaryContainer = Color(0xFFD1D7DB),
             tertiary = AmberWarning,
             onTertiary = Color(0xFF261900),
             background = ObsidianBg,
@@ -235,27 +243,27 @@ fun ZeroTraceTheme(
             onSurfaceVariant = TextSecondary,
             outline = BorderSlate,
             error = CrimsonDanger,
-            onError = Color(0xFF280003)
+            onError = Color.White
         )
     } else {
         lightColorScheme(
             primary = lightPrimary,
             onPrimary = Color.White,
-            primaryContainer = Color(0xFFC2F8D0),
-            onPrimaryContainer = Color(0xFF052E16),
-            secondary = Color(0xFF0F766E),
+            primaryContainer = Color(0xFFD9FDD3),
+            onPrimaryContainer = Color(0xFF111B21),
+            secondary = Color(0xFF008069),
             onSecondary = Color.White,
-            secondaryContainer = Color(0xFFCCFBF1),
-            onSecondaryContainer = Color(0xFF134E4A),
+            secondaryContainer = Color(0xFFE7FCE3),
+            onSecondaryContainer = Color(0xFF0A5C36),
             tertiary = Color(0xFFB45309),
             onTertiary = Color.White,
             background = Color(0xFFFFFFFF),
-            onBackground = Color(0xFF111827),
+            onBackground = Color(0xFF111B21),
             surface = Color(0xFFFFFFFF),
-            onSurface = Color(0xFF111827),
-            surfaceVariant = Color(0xFFEBEFF3),
-            onSurfaceVariant = Color(0xFF6B7280),
-            outline = Color(0xFFE5E7EB),
+            onSurface = Color(0xFF111B21),
+            surfaceVariant = Color(0xFFF0F2F5),
+            onSurfaceVariant = Color(0xFF667781),
+            outline = Color(0xFFE9EDEF),
             error = Color(0xFFEF4444),
             onError = Color.White
         )

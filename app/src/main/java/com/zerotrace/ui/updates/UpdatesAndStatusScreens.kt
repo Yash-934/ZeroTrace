@@ -250,10 +250,10 @@ fun ZeroTraceUpdatesTabScreen(
                             selected = isSelected,
                             onClick = { onPrivacyPolicyChange(policy) },
                             colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primary,
-                                selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
+                                selectedContainerColor = ZeroTracePalette.activePillContainer(),
+                                selectedLabelColor = ZeroTracePalette.activePillContent(),
                                 containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                labelColor = MaterialTheme.colorScheme.onSurface
+                                labelColor = MaterialTheme.colorScheme.onSurfaceVariant
                             ),
                             border = null,
                             shape = RoundedCornerShape(50),
