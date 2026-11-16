@@ -5,9 +5,7 @@ import android.net.Uri
 import android.widget.MediaController
 import android.widget.VideoView
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
-import androidx.activity.result.contract.ActivityResultContracts
+import com.zerotrace.media.rememberSafeMediaPicker
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -547,23 +545,16 @@ private fun CreateEphemeralStatusDialog(
     var selectedType by remember { mutableStateOf(StatusMediaType.TEXT_CARD) }
     var selectedMediaUri by remember { mutableStateOf<Uri?>(null) }
 
-    val photoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri != null) {
+    val mediaPicker = rememberSafeMediaPicker(
+        onImagePicked = { uri ->
             selectedMediaUri = uri
             selectedType = StatusMediaType.IMAGE_CARD
-        }
-    }
-
-    val videoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri != null) {
+        },
+        onVideoPicked = { uri ->
             selectedMediaUri = uri
             selectedType = StatusMediaType.VIDEO_CARD
         }
-    }
+    )
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -592,9 +583,7 @@ private fun CreateEphemeralStatusDialog(
                         selected = selectedType == StatusMediaType.IMAGE_CARD,
                         onClick = {
                             selectedType = StatusMediaType.IMAGE_CARD
-                            photoPickerLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                            )
+                            mediaPicker.pickImage()
                         },
                         leadingIcon = { Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(15.dp)) },
                         label = { Text("Photo", style = MaterialTheme.typography.labelSmall) }
@@ -603,9 +592,7 @@ private fun CreateEphemeralStatusDialog(
                         selected = selectedType == StatusMediaType.VIDEO_CARD,
                         onClick = {
                             selectedType = StatusMediaType.VIDEO_CARD
-                            videoPickerLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
-                            )
+                            mediaPicker.pickVideo()
                         },
                         leadingIcon = { Icon(Icons.Default.Videocam, contentDescription = null, modifier = Modifier.size(15.dp)) },
                         label = { Text("Video", style = MaterialTheme.typography.labelSmall) }
@@ -620,13 +607,9 @@ private fun CreateEphemeralStatusDialog(
                             .fillMaxWidth()
                             .clickable {
                                 if (selectedType == StatusMediaType.VIDEO_CARD) {
-                                    videoPickerLauncher.launch(
-                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
-                                    )
+                                    mediaPicker.pickVideo()
                                 } else {
-                                    photoPickerLauncher.launch(
-                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                    )
+                                    mediaPicker.pickImage()
                                 }
                             }
                     ) {

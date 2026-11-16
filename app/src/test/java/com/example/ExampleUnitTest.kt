@@ -1042,6 +1042,23 @@ class ExampleUnitTest {
         val fallback = explicit.copy(chunksProcessed = 2, uploadProgressFraction = null)
         assertEquals(0.50f, fallback.effectiveFraction(), 0.0001f)
     }
+
+    @Test
+    fun externalPickerGuard_tracksAndClearsInFlightState() {
+        com.zerotrace.media.ExternalPickerGuard.clearOnPickerResult()
+        assertFalse(com.zerotrace.media.ExternalPickerGuard.isExternalPickerInFlight())
+
+        com.zerotrace.media.ExternalPickerGuard.markLaunchingExternalPicker()
+        assertTrue(com.zerotrace.media.ExternalPickerGuard.isExternalPickerInFlight())
+
+        com.zerotrace.media.ExternalPickerGuard.onHostActivityResumed()
+        assertFalse(com.zerotrace.media.ExternalPickerGuard.isExternalPickerInFlight())
+
+        com.zerotrace.media.ExternalPickerGuard.markLaunchingExternalPicker()
+        assertTrue(com.zerotrace.media.ExternalPickerGuard.isExternalPickerInFlight())
+        com.zerotrace.media.ExternalPickerGuard.clearOnPickerResult()
+        assertFalse(com.zerotrace.media.ExternalPickerGuard.isExternalPickerInFlight())
+    }
 }
 
 

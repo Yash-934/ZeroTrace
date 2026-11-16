@@ -134,6 +134,7 @@ object MediaExportAndOpenHelper {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             val pm = context.packageManager
+            ExternalPickerGuard.markLaunchingExternalPicker()
             if (intent.resolveActivity(pm) != null) {
                 context.startActivity(intent)
                 Result.success(Unit)
@@ -146,6 +147,7 @@ object MediaExportAndOpenHelper {
                 Result.success(Unit)
             }
         } catch (t: Throwable) {
+            ExternalPickerGuard.clearOnPickerResult()
             Result.failure(t)
         }
     }

@@ -11,8 +11,9 @@ import android.os.Environment
 import android.provider.MediaStore
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import com.zerotrace.media.ExternalPickerGuard
+import com.zerotrace.media.rememberSafeMediaPicker
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -160,11 +161,9 @@ fun AddContactScreen(
         hasCameraPermission = granted
     }
 
-    // Zero-permission Android Photo Picker for uploading a QR image or screenshot from Gallery
-    val galleryQrPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri != null) {
+    // Crash-proof, zero-permission Gallery / Photo Picker for uploading a QR image or screenshot
+    val galleryMediaPicker = rememberSafeMediaPicker(
+        onImagePicked = { uri ->
             localGalleryError = null
             localGalleryMessage = if (isHi) "गैलरी छवि से QR डिकोड किया जा रहा है…" else "Decoding QR from gallery image…"
             scope.launch {
@@ -183,7 +182,7 @@ fun AddContactScreen(
                 }
             }
         }
-    }
+    )
 
     Scaffold(
         topBar = {
@@ -384,6 +383,7 @@ fun AddContactScreen(
                             OutlinedButton(
                                 onClick = {
                                     try {
+                                        ExternalPickerGuard.markLaunchingExternalPicker()
                                         val shareIntent = Intent(Intent.ACTION_SEND).apply {
                                             type = "text/plain"
                                             putExtra(Intent.EXTRA_TEXT, myPairingQrString)
@@ -394,7 +394,8 @@ fun AddContactScreen(
                                                 if (isHi) "हस्ताक्षरित ZT2|v1 पेयरिंग कोड साझा करें" else "Share Signed ZT2|v1 Invite"
                                             )
                                         )
-                                    } catch (_: Exception) {
+                                    } catch (_: Throwable) {
+                                        ExternalPickerGuard.clearOnPickerResult()
                                     }
                                 },
                                 modifier = Modifier
@@ -456,11 +457,7 @@ fun AddContactScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Button(
-                            onClick = {
-                                galleryQrPickerLauncher.launch(
-                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                )
-                            },
+                            onClick = { galleryMediaPicker.pickImage() },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = MaterialTheme.colorScheme.secondary,
                                 contentColor = MaterialTheme.colorScheme.onSecondary

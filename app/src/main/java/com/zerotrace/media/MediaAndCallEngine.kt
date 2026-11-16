@@ -132,17 +132,20 @@ object MediaRamLoader {
         }
         var reportedSize = -1L
 
-        resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
-                if (nameIdx >= 0) {
-                    cursor.getString(nameIdx)?.takeIf { it.isNotBlank() }?.let { displayName = it }
-                }
-                if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) {
-                    reportedSize = cursor.getLong(sizeIdx)
+        try {
+            resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (nameIdx >= 0) {
+                        cursor.getString(nameIdx)?.takeIf { it.isNotBlank() }?.let { displayName = it }
+                    }
+                    if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) {
+                        reportedSize = cursor.getLong(sizeIdx)
+                    }
                 }
             }
+        } catch (_: Throwable) {
         }
 
         if (reportedSize > EncryptedFileTransferEngine.MAX_FILE_SIZE_BYTES && kind != MessagePayloadKind.IMAGE) {

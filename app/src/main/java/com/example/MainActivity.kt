@@ -34,8 +34,12 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,8 +48,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.zerotrace.bridge.CallMediaKind
+import com.zerotrace.media.ExternalPickerGuard
 import com.zerotrace.security.BiometricAuthHelper
 import com.zerotrace.security.SecureWindowManager
 import com.zerotrace.ui.AppLanguage
@@ -129,10 +137,27 @@ class MainActivity : FragmentActivity() {
                 }
             }
 
-            LaunchedEffect(uiState.isAppBiometricLocked, uiState.identitySummary != null) {
-                if (uiState.isAppBiometricLocked && uiState.identitySummary != null) {
+            val lifecycleOwner = LocalLifecycleOwner.current
+            var isActivityResumed by remember { mutableStateOf(false) }
+            DisposableEffect(lifecycleOwner) {
+                isActivityResumed = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+                val observer = LifecycleEventObserver { _, event ->
+                    when (event) {
+                        Lifecycle.Event.ON_RESUME -> isActivityResumed = true
+                        Lifecycle.Event.ON_PAUSE -> isActivityResumed = false
+                        else -> Unit
+                    }
+                }
+                lifecycleOwner.lifecycle.addObserver(observer)
+                onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+            }
+
+            LaunchedEffect(uiState.isAppBiometricLocked, uiState.identitySummary != null, isActivityResumed) {
+                if (uiState.isAppBiometricLocked && uiState.identitySummary != null && isActivityResumed) {
                     delay(180L)
-                    launchUnlockPrompt()
+                    if (isActivityResumed) {
+                        launchUnlockPrompt()
+                    }
                 }
             }
 
@@ -164,8 +189,16 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        ExternalPickerGuard.onHostActivityResumed()
+    }
+
     override fun onStop() {
         super.onStop()
+        if (ExternalPickerGuard.isExternalPickerInFlight()) {
+            return
+        }
         viewModel.lockAppIfBiometricEnabled()
         val state = viewModel.uiState.value
         if (state.autoLockOnBackground && !state.foreverVaultEnabled && state.activeSessionHandle != null) {

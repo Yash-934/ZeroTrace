@@ -129,6 +129,7 @@ dependencies {
   implementation(libs.tor.android)
   implementation(libs.jtorctl)
   implementation(libs.androidx.biometric)
+  implementation(libs.androidx.fragment.ktx)
 
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)

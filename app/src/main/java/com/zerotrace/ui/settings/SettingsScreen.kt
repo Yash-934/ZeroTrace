@@ -3,9 +3,7 @@ package com.zerotrace.ui.settings
 import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
-import androidx.activity.result.contract.ActivityResultContracts
+import com.zerotrace.media.rememberSafeMediaPicker
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -981,20 +979,29 @@ private fun EditLocalProfileDialog(
     var pickedAvatarUri by remember { mutableStateOf<Uri?>(null) }
     var removePhoto by remember { mutableStateOf(false) }
 
-    val photoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri != null) {
+    val mediaPicker = rememberSafeMediaPicker(
+        onImagePicked = { uri ->
             pickedAvatarUri = uri
             removePhoto = false
         }
-    }
+    )
 
     val previewBitmap = remember(pickedAvatarUri) {
         pickedAvatarUri?.let { uri ->
             try {
-                context.contentResolver.openInputStream(uri)?.use { stream ->
-                    BitmapFactory.decodeStream(stream)?.asImageBitmap()
+                val resolver = context.contentResolver
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                resolver.openInputStream(uri)?.use { stream ->
+                    BitmapFactory.decodeStream(stream, null, bounds)
+                }
+                val maxSide = maxOf(bounds.outWidth, bounds.outHeight)
+                var sample = 1
+                while (maxSide > 0 && maxSide / sample > 360) {
+                    sample *= 2
+                }
+                val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+                resolver.openInputStream(uri)?.use { stream ->
+                    BitmapFactory.decodeStream(stream, null, opts)?.asImageBitmap()
                 }
             } catch (_: Throwable) {
                 null
@@ -1020,11 +1027,7 @@ private fun EditLocalProfileDialog(
                     modifier = Modifier
                         .size(86.dp)
                         .clip(CircleShape)
-                        .clickable {
-                            photoPickerLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                            )
-                        },
+                        .clickable { mediaPicker.pickImage() },
                     contentAlignment = Alignment.Center
                 ) {
                     if (previewBitmap != null) {
@@ -1047,11 +1050,7 @@ private fun EditLocalProfileDialog(
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
-                        onClick = {
-                            photoPickerLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                            )
-                        },
+                        onClick = { mediaPicker.pickImage() },
                         modifier = Modifier.testTag("profile_pick_photo_button")
                     ) {
                         Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(16.dp))

@@ -215,14 +215,26 @@ object QrCodeEngine {
      */
     fun decodeQrFromUri(context: Context, uri: Uri): String? {
         return try {
+            val resolver = context.contentResolver
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            resolver.openInputStream(uri)?.use { stream ->
+                BitmapFactory.decodeStream(stream, null, bounds)
+            } ?: return null
+
+            val maxSide = maxOf(bounds.outWidth, bounds.outHeight)
+            var sample = 1
+            while (maxSide > 0 && maxSide / sample > 2048) {
+                sample *= 2
+            }
             val options = BitmapFactory.Options().apply {
+                inSampleSize = sample
                 inPreferredConfig = Bitmap.Config.ARGB_8888
             }
-            val bitmap = context.contentResolver.openInputStream(uri)?.use { stream ->
+            val bitmap = resolver.openInputStream(uri)?.use { stream ->
                 BitmapFactory.decodeStream(stream, null, options)
             } ?: return null
             decodeQrFromBitmap(bitmap)
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             null
         }
     }

@@ -951,9 +951,9 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                         )
                     }
                 }
-            } catch (e: Exception) {
+            } catch (t: Throwable) {
                 _uiState.update {
-                    it.copy(errorBannerMessage = "Profile update failed: ${e.message}")
+                    it.copy(errorBannerMessage = "Profile update failed: ${t.message ?: "Unable to process image"}")
                 }
             }
         }

@@ -102,4 +102,21 @@ class ExampleRobolectricTest {
         keystoreManager.deleteIdentityAndWrappingKey()
         assertNull(keystoreManager.loadWrappedPrefsAndProfile())
     }
+
+    @Test
+    fun testFragmentActivitySupports32BitActivityResultRegistryRequestCodes() {
+        val controller = org.robolectric.Robolectric.buildActivity(MainActivity::class.java).setup()
+        val activity = controller.get()
+        val launcher = activity.activityResultRegistry.register(
+            "test_pick_visual_media",
+            androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia()
+        ) { _ -> }
+        // In fragment:1.2.5 this threw IllegalArgumentException: Can only use lower 16 bits for requestCode
+        launcher.launch(
+            androidx.activity.result.PickVisualMediaRequest(
+                androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly
+            )
+        )
+        launcher.unregister()
+    }
 }

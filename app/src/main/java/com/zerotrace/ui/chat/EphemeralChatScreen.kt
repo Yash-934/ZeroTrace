@@ -9,8 +9,9 @@ import android.widget.MediaController
 import android.widget.VideoView
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import com.zerotrace.media.ExternalPickerGuard
+import com.zerotrace.media.rememberSafeMediaPicker
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -181,37 +182,16 @@ fun EphemeralChatScreen(
     var moreMenuExpanded by remember { mutableStateOf(false) }
     var showSecuritySheet by remember { mutableStateOf(false) }
 
-    val photoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri != null) {
-            onPickMediaUri(uri, MessagePayloadKind.IMAGE)
-        }
-    }
-    val videoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri != null) {
-            onPickMediaUri(uri, MessagePayloadKind.VIDEO)
-        }
-    }
-    val documentPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
-            onPickMediaUri(uri, MessagePayloadKind.DOCUMENT)
-        }
-    }
-    val audioPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
-            onPickMediaUri(uri, MessagePayloadKind.AUDIO_FILE)
-        }
-    }
+    val mediaPicker = rememberSafeMediaPicker(
+        onImagePicked = { uri -> onPickMediaUri(uri, MessagePayloadKind.IMAGE) },
+        onVideoPicked = { uri -> onPickMediaUri(uri, MessagePayloadKind.VIDEO) },
+        onDocumentPicked = { uri -> onPickMediaUri(uri, MessagePayloadKind.DOCUMENT) },
+        onAudioPicked = { uri -> onPickMediaUri(uri, MessagePayloadKind.AUDIO_FILE) }
+    )
     val cameraCaptureLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicturePreview()
     ) { bitmap ->
+        ExternalPickerGuard.clearOnPickerResult()
         if (bitmap != null) {
             onCapturedCameraBitmap(bitmap)
         }
@@ -220,7 +200,12 @@ fun EphemeralChatScreen(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
-            cameraCaptureLauncher.launch(null)
+            try {
+                ExternalPickerGuard.markLaunchingExternalPicker()
+                cameraCaptureLauncher.launch(null)
+            } catch (_: Throwable) {
+                ExternalPickerGuard.clearOnPickerResult()
+            }
         }
     }
     val micPermissionLauncher = rememberLauncherForActivityResult(
@@ -697,23 +682,19 @@ fun EphemeralChatScreen(
                 AttachmentPicker(
                     onPickPhoto = {
                         onShowAttachmentSheet(false)
-                        photoPickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                        )
+                        mediaPicker.pickImage()
                     },
                     onPickVideo = {
                         onShowAttachmentSheet(false)
-                        videoPickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
-                        )
+                        mediaPicker.pickVideo()
                     },
                     onPickDocument = {
                         onShowAttachmentSheet(false)
-                        documentPickerLauncher.launch(arrayOf("*/*"))
+                        mediaPicker.pickDocument(arrayOf("*/*"), "*/*")
                     },
                     onPickAudio = {
                         onShowAttachmentSheet(false)
-                        audioPickerLauncher.launch(arrayOf("audio/*"))
+                        mediaPicker.pickDocument(arrayOf("audio/*"), "audio/*")
                     },
                     onPickContactCard = {
                         onShowAttachmentSheet(false)
@@ -772,7 +753,12 @@ fun EphemeralChatScreen(
                         Manifest.permission.CAMERA
                     ) == PackageManager.PERMISSION_GRANTED
                     if (hasCamPerm) {
-                        cameraCaptureLauncher.launch(null)
+                        try {
+                            ExternalPickerGuard.markLaunchingExternalPicker()
+                            cameraCaptureLauncher.launch(null)
+                        } catch (_: Throwable) {
+                            ExternalPickerGuard.clearOnPickerResult()
+                        }
                     } else {
                         cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
                     }

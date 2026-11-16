@@ -503,13 +503,28 @@ object EncryptedVaultCodec {
     }
 
     fun compressAvatarUriToCompactJpeg(context: Context, uri: Uri): ByteArray {
-        val raw = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            ?: throw IllegalStateException("Cannot read selected image")
-        val decoded = BitmapFactory.decodeByteArray(raw, 0, raw.size)
-            ?: throw IllegalStateException("Unsupported image format")
-        val dim = minOf(decoded.width, decoded.height)
-        val xOff = (decoded.width - dim) / 2
-        val yOff = (decoded.height - dim) / 2
+        val resolver = context.contentResolver
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        resolver.openInputStream(uri)?.use { stream ->
+            BitmapFactory.decodeStream(stream, null, bounds)
+        } ?: throw IllegalStateException("Cannot read selected image")
+
+        val maxSide = maxOf(bounds.outWidth, bounds.outHeight)
+        var sample = 1
+        while (maxSide > 0 && maxSide / sample > 512) {
+            sample *= 2
+        }
+        val decodeOpts = BitmapFactory.Options().apply {
+            inSampleSize = sample
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        val decoded = resolver.openInputStream(uri)?.use { stream ->
+            BitmapFactory.decodeStream(stream, null, decodeOpts)
+        } ?: throw IllegalStateException("Unsupported image format")
+
+        val dim = minOf(decoded.width, decoded.height).coerceAtLeast(1)
+        val xOff = ((decoded.width - dim) / 2).coerceAtLeast(0)
+        val yOff = ((decoded.height - dim) / 2).coerceAtLeast(0)
         val square = Bitmap.createBitmap(decoded, xOff, yOff, dim, dim)
         val scaled = Bitmap.createScaledBitmap(square, 160, 160, true)
         if (square !== decoded) square.recycle()

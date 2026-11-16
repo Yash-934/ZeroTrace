@@ -6,6 +6,7 @@ import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.Lifecycle
 
 sealed interface BiometricCapability {
     data object ReadyBiometricOrCredential : BiometricCapability
@@ -71,6 +72,11 @@ object BiometricAuthHelper {
         onSuccess: () -> Unit,
         onError: (String) -> Unit
     ) {
+        if (activity.isFinishing || activity.isDestroyed ||
+            !activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        ) {
+            return
+        }
         val capability = checkCapability(activity)
         if (capability is BiometricCapability.Unavailable) {
             onError(capability.reason)
