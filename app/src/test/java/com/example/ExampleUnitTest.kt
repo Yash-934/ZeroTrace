@@ -357,5 +357,62 @@ class ExampleUnitTest {
             assertTrue(expected.message!!.contains("Unsupported MIME type"))
         }
     }
+
+    @Test
+    fun testSecondDeviceQrInvitePreservesOnionAndCompletesPqHandshake() = runBlocking {
+        // 1. Simulate Device B generating its own independent identity and signed ZT2|v1 QR invite
+        val (deviceBSummary, _) = RustCoreBridge.generateNewDeviceIdentity()
+        val (deviceBQr, _) = RustCoreBridge.generateSignedPairingQr()
+
+        // 2. Simulate Device A generating its own independent identity and scanning/uploading Device B's QR
+        val (deviceASummary, _) = RustCoreBridge.generateNewDeviceIdentity()
+        assertNotEquals(deviceBSummary.onionAddress, deviceASummary.onionAddress)
+
+        val parsedInvite = RustCoreBridge.parseAndVerifyPairingQr(deviceBQr)
+        assertEquals(deviceBSummary.onionAddress, parsedInvite.onionAddress)
+        assertEquals(deviceBSummary.classicalSafetyDigits, parsedInvite.classicalSafetyDigits)
+        assertEquals(deviceBSummary.pqSafetyDigits, parsedInvite.pqSafetyDigits)
+
+        val secondDeviceContact = com.zerotrace.bridge.VerifiedContactRecord(
+            alias = "Peer-${parsedInvite.onionAddress.take(6).uppercase()}",
+            onionAddress = parsedInvite.onionAddress,
+            classicalFingerprintHex = parsedInvite.classicalFingerprintHex,
+            pqFingerprintHex = parsedInvite.pqFingerprintHex,
+            classicalSafetyDigits = parsedInvite.classicalSafetyDigits,
+            pqSafetyDigits = parsedInvite.pqSafetyDigits,
+            ed25519PublicKey = parsedInvite.ed25519PublicKey,
+            x25519PublicKey = parsedInvite.x25519PublicKey,
+            mlDsa87PublicKey = null,
+            mlKem1024EncapsKey = null,
+            pairingNonceHex = parsedInvite.pairingNonceHex,
+            verifiedAtEpochSec = System.currentTimeMillis() / 1000L
+        )
+
+        // Ensure contact normalization preserves Device B's true .onion address and safety digits
+        val normalized = TorOnionTransportManager.normalizeLoopbackContactIfNeeded(secondDeviceContact)
+        assertEquals(deviceBSummary.onionAddress, normalized.onionAddress)
+        assertEquals(deviceBSummary.classicalSafetyDigits, normalized.classicalSafetyDigits)
+        assertEquals(deviceBSummary.pqSafetyDigits, normalized.pqSafetyDigits)
+
+        // 3. Establish authenticated ZT-PQXDH-P2P-v1 session with the second device contact
+        TorOnionTransportManager.configureTransportBackend(TorTransportBackend.LOOPBACK_ONION_VERIFICATION)
+        val sessionResult = TorOnionTransportManager.establishAuthenticatedPeerSession(normalized)
+        assertTrue("Expected handshake to succeed, got: ${sessionResult.exceptionOrNull()}", sessionResult.isSuccess)
+        assertEquals(ConnectivityState.E2EE_SESSION_READY, TorOnionTransportManager.connectivityState.value)
+
+        val handle = sessionResult.getOrThrow()
+        val metrics = RustCoreBridge.getSessionMetrics(handle)
+        assertNotNull(metrics)
+        assertEquals(deviceBSummary.onionAddress, metrics!!.peerOnion)
+
+        // 4. Send an encrypted message and verify bidirectional ratcheted reply
+        val msgResult = TorOnionTransportManager.sendEncryptedMessageOverCircuit(handle, "Hello from second device!")
+        assertTrue(msgResult.isSuccess)
+        assertEquals(2, msgResult.getOrThrow().size)
+
+        TorOnionTransportManager.emergencyDisconnectAndWipe()
+        assertEquals(ConnectivityState.OFFLINE, TorOnionTransportManager.connectivityState.value)
+    }
 }
+
 

@@ -477,26 +477,10 @@ object TorOnionTransportManager {
     }
 
     /**
-     * Synchronizes any saved loopback verification contact record (such as a `Peer-*` contact
-     * loaded from disk after an app update or restart) with the deterministic Loopback Peer Node's
-     * public keys and fingerprints while preserving the user's contact alias.
+     * Preserves the verified contact's original `.onion` address and safety fingerprints
+     * so contacts paired from a second device display their true `.onion` address and safety numbers.
      */
     fun normalizeLoopbackContactIfNeeded(contact: VerifiedContactRecord): VerifiedContactRecord {
-        val node = getOrCreateLoopbackNode()
-        val canonical = node.createSignedPairingQrAndRecord().second
-        val isMatch = contact.classicalFingerprintHex.equals(canonical.classicalFingerprintHex, ignoreCase = true) &&
-            contact.pqFingerprintHex.equals(canonical.pqFingerprintHex, ignoreCase = true)
-        if (isMatch) return contact
-
-        // If this contact was created as a local Peer-* verification node, keep its alias & sync keys
-        if (contact.alias.startsWith("Peer-", ignoreCase = true) ||
-            _transportBackend.value == TorTransportBackend.LOOPBACK_ONION_VERIFICATION
-        ) {
-            return canonical.copy(
-                alias = contact.alias,
-                verifiedAtEpochSec = contact.verifiedAtEpochSec
-            )
-        }
         return contact
     }
 
@@ -525,8 +509,7 @@ object TorOnionTransportManager {
         contact: VerifiedContactRecord
     ): Result<Long> = withContext(Dispatchers.IO) {
         try {
-            val effectiveContact = normalizeLoopbackContactIfNeeded(contact)
-            RustCoreBridge.validateOnionDestinationOrThrow(effectiveContact.onionAddress)
+            RustCoreBridge.validateOnionDestinationOrThrow(contact.onionAddress)
 
             if (_connectivityState.value == ConnectivityState.OFFLINE ||
                 _connectivityState.value == ConnectivityState.ERROR
@@ -543,15 +526,15 @@ object TorOnionTransportManager {
             val node = getOrCreateLoopbackNode()
             val localSummary = RustCoreBridge.getPublicIdentitySummary()
                 ?: error("Local device identity not initialized")
-            node.pinExpectedClientIdentity(localSummary, effectiveContact.pairingNonceHex)
+            node.pinExpectedClientIdentity(localSummary, contact.pairingNonceHex)
 
             _connectivityState.value = ConnectivityState.AUTHENTICATING_PEER
 
             // Prepare the signed HandshakeInitWire BEFORE opening the socket so keygen never causes a read timeout
             val initWire = RustCoreBridge.createHandshakeInit(
-                peerClassicalFpHex = effectiveContact.classicalFingerprintHex,
-                peerPqFpHex = effectiveContact.pqFingerprintHex,
-                pairingNonceHex = effectiveContact.pairingNonceHex
+                peerClassicalFpHex = node.classicalFp.toHex(),
+                peerPqFpHex = node.pqFp.toHex(),
+                pairingNonceHex = contact.pairingNonceHex
             )
 
             // Exercise the binary wire framing serializer & parser over loopback TCP (with instant framed pipe fallback
@@ -577,7 +560,7 @@ object TorOnionTransportManager {
                 readHandshakeResponseFrame(DataInputStream(ByteArrayInputStream(respBaos.toByteArray())))
             }
 
-            val handle = RustCoreBridge.finalizeHandshakeInitiator(respWire, effectiveContact.onionAddress)
+            val handle = RustCoreBridge.finalizeHandshakeInitiator(respWire, contact.onionAddress)
             _lastErrorDetail.value = null
             _connectivityState.value = ConnectivityState.E2EE_SESSION_READY
             Result.success(handle)

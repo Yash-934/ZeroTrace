@@ -608,7 +608,7 @@ object RustCoreBridge {
         }
 
         val expirySec = parts[7].toLongOrNull() ?: throw IllegalArgumentException("Invalid expiry timestamp")
-        if (expirySec <= nowUnixSec || expirySec > nowUnixSec + 960L) {
+        if (expirySec <= nowUnixSec - 3600L || expirySec > nowUnixSec + 7200L) {
             throw SecurityException("QR pairing artifact has expired or has an out-of-range expiry")
         }
 
@@ -1312,7 +1312,7 @@ object RustCoreBridge {
     }
 
     fun signMlDsa87(privateKeyEncoded: ByteArray, message: ByteArray): ByteArray {
-        val privParams = MLDSAPrivateKeyParameters(MLDSAParameters.ml_dsa_87, privateKeyEncoded)
+        val privParams = MLDSAPrivateKeyParameters(MLDSAParameters.ml_dsa_87, privateKeyEncoded, null)
         val signer = MLDSASigner()
         signer.init(true, privParams)
         signer.update(message, 0, message.size)

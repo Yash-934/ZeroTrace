@@ -48,15 +48,21 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.ui.graphics.Color
 import com.zerotrace.bridge.PublicIdentitySummary
 import com.zerotrace.network.ConnectivityState
 import com.zerotrace.security.HardwareSecurityLevel
 import com.zerotrace.security.SecureWindowManager
 import com.zerotrace.ui.AppLanguage
 import com.zerotrace.ui.pairing.QrCodeEngine
+import com.zerotrace.ui.pairing.saveQrBitmapToGallery
 import com.zerotrace.ui.theme.AmberWarning
 import com.zerotrace.ui.theme.CyanAccent
 import com.zerotrace.ui.theme.EmeraldPrimary
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Screen 3: Identity Creation Screen (Section 7.3)
@@ -321,14 +327,15 @@ fun MyIdentityScreen(
 
                         if (pairingQrString != null) {
                             val qrBitmap = remember(pairingQrString) {
-                                QrCodeEngine.encodeQrBitmap(pairingQrString, 560)
+                                QrCodeEngine.encodeQrBitmap(pairingQrString, 680)
                             }
                             Box(
                                 modifier = Modifier
-                                    .size(230.dp)
+                                    .size(250.dp)
                                     .clip(RoundedCornerShape(12.dp))
-                                    .border(2.dp, EmeraldPrimary, RoundedCornerShape(12.dp))
-                                    .padding(6.dp),
+                                    .background(Color.White)
+                                    .border(3.dp, EmeraldPrimary, RoundedCornerShape(12.dp))
+                                    .padding(8.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Image(
@@ -346,6 +353,47 @@ fun MyIdentityScreen(
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        scope.launch {
+                                            withContext(Dispatchers.IO) {
+                                                saveQrBitmapToGallery(context, pairingQrString)
+                                            }
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(48.dp)
+                                        .testTag("identity_save_qr_button")
+                                ) {
+                                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(if (isHi) "गैलरी में सेव" else "Save QR Image")
+                                }
+                                OutlinedButton(
+                                    onClick = {
+                                        SecureWindowManager.copyWithAutoScrub(
+                                            context = context,
+                                            label = "ZeroTrace Signed QR Invite",
+                                            value = pairingQrString,
+                                            scope = scope
+                                        )
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(48.dp)
+                                        .testTag("identity_copy_qr_payload_button")
+                                ) {
+                                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(if (isHi) "ZT2|v1 कॉपी" else "Copy Invite")
+                                }
+                            }
                         }
                     }
                 }
