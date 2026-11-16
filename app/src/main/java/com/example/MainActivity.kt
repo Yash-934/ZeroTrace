@@ -103,6 +103,7 @@ fun ZeroTraceRootApp(
     val transportBackend by viewModel.transportBackend.collectAsStateWithLifecycle()
     val localListenerPort by viewModel.localListenerPort.collectAsStateWithLifecycle()
     val transportError by viewModel.transportError.collectAsStateWithLifecycle()
+    val connectedPeerOnions by viewModel.connectedPeerOnions.collectAsStateWithLifecycle()
 
     val effectiveErrorBanner = uiState.errorBannerMessage ?: transportError
     val isHindi = uiState.language == AppLanguage.HINDI
@@ -332,11 +333,16 @@ fun ZeroTraceRootApp(
             } else {
                 emptyList()
             }
+            val isPeerConnected = activePeer?.let {
+                it.onionAddress.lowercase() in connectedPeerOnions ||
+                    com.zerotrace.network.TorOnionTransportManager.isLoopbackVerificationContact(it)
+            } == true
 
             EphemeralChatScreen(
                 language = uiState.language,
                 peerContact = activePeer,
                 connectivityState = connectivityState,
+                isPeerMeshConnected = isPeerConnected,
                 richMessages = richMsgs,
                 ratchetMetrics = uiState.activeRatchetMetrics,
                 replyingToMessage = uiState.replyingToMessage,
@@ -345,6 +351,7 @@ fun ZeroTraceRootApp(
                 isRecordingVoiceNote = uiState.isRecordingVoiceNote,
                 inChatSearchQuery = uiState.inChatSearchQuery,
                 wallpaperStyle = uiState.wallpaperStyle,
+                statusBanner = uiState.statusBannerMessage,
                 errorBanner = effectiveErrorBanner,
                 onInChatSearchChange = viewModel::updateInChatSearchQuery,
                 onSendMessage = { viewModel.sendEphemeralChatMessage(it) },
@@ -368,6 +375,10 @@ fun ZeroTraceRootApp(
                     if (activePeer != null) viewModel.openContactProfile(activePeer)
                 },
                 onTriggerPqBraidStep = viewModel::triggerManualPqBraidRatchetStep,
+                onReconnectPeer = {
+                    activePeer?.let(viewModel::startAuthenticatedSessionWithContact)
+                },
+                onBackToChats = viewModel::navigateBackToChatsPreservingSession,
                 onDisconnectAndWipeSession = viewModel::terminateActiveChatSession
             )
         }

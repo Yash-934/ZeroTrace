@@ -25,6 +25,8 @@ import com.zerotrace.bridge.VerifiedContactRecord
 import com.zerotrace.bridge.VolatileCallHistoryEntry
 import com.zerotrace.bridge.VolatileChatMessage
 import com.zerotrace.network.ConnectivityState
+import com.zerotrace.network.PeerHelloWire
+import com.zerotrace.network.PeerTransportEvent
 import com.zerotrace.network.SessionService
 import com.zerotrace.network.TorOnionTransportManager
 import com.zerotrace.network.TorTransportBackend
@@ -143,7 +145,7 @@ data class ZeroTraceUiState(
     // Privacy & Security Controls
     val sessionTimeoutSeconds: Long = 300L,
     val disappearingMessageTimerSec: Long = 300L,
-    val autoLockOnBackground: Boolean = true,
+    val autoLockOnBackground: Boolean = false,
     val biometricAppLockEnabled: Boolean = false,
     val flagSecureEnabled: Boolean = false,
     val readReceiptsEnabled: Boolean = true,
@@ -169,13 +171,133 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
     val transportBackend: StateFlow<TorTransportBackend> = TorOnionTransportManager.transportBackend
     val localListenerPort: StateFlow<Int?> = TorOnionTransportManager.localListenerPort
     val transportError: StateFlow<String?> = TorOnionTransportManager.lastErrorDetail
+    val connectedPeerOnions: StateFlow<Set<String>> = TorOnionTransportManager.connectedPeerOnions
 
     private var inactivityWatchdogJob: Job? = null
     private var callTimerJob: Job? = null
 
     init {
+        TorOnionTransportManager.initializePlatform(appContext)
+        observePeerTransportEvents()
         initializeSecuritySubsystem()
         startInactivityWatchdog()
+    }
+
+    private fun observePeerTransportEvents() {
+        viewModelScope.launch {
+            TorOnionTransportManager.peerTransportEvents.collect { event ->
+                when (event) {
+                    is PeerTransportEvent.PeerConnected -> {
+                        ensurePeerContactFromHello(event.peerHello)
+                    }
+                    is PeerTransportEvent.PeerDisconnected -> {
+                        val currentPeerOnion = _uiState.value.activePeerContact?.onionAddress
+                        if (currentPeerOnion != null && currentPeerOnion.equals(event.peerOnion, ignoreCase = true)) {
+                            _uiState.update { state ->
+                                state.copy(
+                                    statusBannerMessage = isHi(
+                                        "पीयर P2P कनेक्शन अस्थायी रूप से कट गया — पुनः जुड़ने का प्रयास हो रहा है…",
+                                        "Peer P2P circuit temporarily disconnected — auto-reconnecting…"
+                                    )
+                                )
+                            }
+                        }
+                    }
+                    is PeerTransportEvent.SessionEstablished -> {
+                        val contact = event.peerHello?.let { ensurePeerContactFromHello(it) }
+                            ?: _uiState.value.verifiedContacts.firstOrNull {
+                                it.onionAddress.equals(event.peerOnion, ignoreCase = true)
+                            }
+                        val canonicalOnion = contact?.onionAddress ?: event.peerOnion
+                        val volatileMsgs = RustCoreBridge.getVolatileMessages(event.sessionHandle)
+                        val metrics = RustCoreBridge.getSessionMetrics(event.sessionHandle)
+                        syncVolatileMessagesToRichConversation(canonicalOnion, volatileMsgs)
+
+                        _uiState.update { state ->
+                            val isCurrentPeer = state.activePeerContact?.onionAddress?.equals(canonicalOnion, ignoreCase = true) == true ||
+                                state.activePeerContact == null
+                            state.copy(
+                                activeSessionHandle = if (isCurrentPeer) event.sessionHandle else state.activeSessionHandle,
+                                activePeerContact = state.activePeerContact ?: contact,
+                                activeChatMessages = if (isCurrentPeer) volatileMsgs else state.activeChatMessages,
+                                activeRatchetMetrics = if (isCurrentPeer) metrics else state.activeRatchetMetrics,
+                                statusBannerMessage = null,
+                                errorBannerMessage = null
+                            )
+                        }
+                    }
+                    is PeerTransportEvent.IncomingMessage -> {
+                        val contact = _uiState.value.verifiedContacts.firstOrNull {
+                            it.onionAddress.equals(event.peerOnion, ignoreCase = true)
+                        }
+                        val canonicalOnion = contact?.onionAddress ?: event.peerOnion
+                        val volatileMsgs = RustCoreBridge.getVolatileMessages(event.sessionHandle)
+                        val metrics = RustCoreBridge.getSessionMetrics(event.sessionHandle)
+                        syncVolatileMessagesToRichConversation(canonicalOnion, volatileMsgs)
+
+                        _uiState.update { state ->
+                            val isViewingThisPeer = state.currentScreen == ZeroTraceScreen.CHAT &&
+                                state.activePeerContact?.onionAddress?.equals(canonicalOnion, ignoreCase = true) == true
+                            val updatedUnread = state.unreadCountByOnion.toMutableMap()
+                            if (isViewingThisPeer) {
+                                updatedUnread[canonicalOnion] = 0
+                            } else {
+                                updatedUnread[canonicalOnion] = (updatedUnread[canonicalOnion] ?: 0) + 1
+                            }
+                            state.copy(
+                                activeSessionHandle = if (isViewingThisPeer || state.activeSessionHandle == null) event.sessionHandle else state.activeSessionHandle,
+                                activeChatMessages = if (isViewingThisPeer) volatileMsgs else state.activeChatMessages,
+                                activeRatchetMetrics = if (isViewingThisPeer) metrics else state.activeRatchetMetrics,
+                                unreadCountByOnion = updatedUnread,
+                                errorBannerMessage = null
+                            )
+                        }
+                    }
+                    is PeerTransportEvent.DeliveryAck -> {
+                        val handle = _uiState.value.activeSessionHandle
+                        if (handle != null) {
+                            _uiState.update { state ->
+                                state.copy(
+                                    activeRatchetMetrics = RustCoreBridge.getSessionMetrics(handle) ?: state.activeRatchetMetrics
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun ensurePeerContactFromHello(hello: PeerHelloWire): VerifiedContactRecord {
+        val existing = _uiState.value.verifiedContacts.firstOrNull {
+            it.onionAddress.equals(hello.onionAddress, ignoreCase = true)
+        }
+        if (existing != null) return existing
+
+        val classicalFpBytes = ByteArray(hello.classicalFingerprintHex.length / 2) { i ->
+            hello.classicalFingerprintHex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+        }
+        val pqFpBytes = ByteArray(hello.pqFingerprintHex.length / 2) { i ->
+            hello.pqFingerprintHex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+        }
+        val autoContact = VerifiedContactRecord(
+            alias = "Peer-${hello.onionAddress.take(6).uppercase()}",
+            onionAddress = hello.onionAddress.lowercase(),
+            classicalFingerprintHex = hello.classicalFingerprintHex.lowercase(),
+            pqFingerprintHex = hello.pqFingerprintHex.lowercase(),
+            classicalSafetyDigits = RustCoreBridge.formatSafetyDigits(classicalFpBytes),
+            pqSafetyDigits = RustCoreBridge.formatSafetyDigits(pqFpBytes),
+            ed25519PublicKey = hello.ed25519PublicKey.copyOf(),
+            x25519PublicKey = hello.x25519PublicKey.copyOf(),
+            mlDsa87PublicKey = null,
+            mlKem1024EncapsKey = null,
+            pairingNonceHex = hello.pairingNonceHex,
+            verifiedAtEpochSec = System.currentTimeMillis() / 1000L
+        )
+        val updated = _uiState.value.verifiedContacts + autoContact
+        saveEncryptedContactsToDisk(updated)
+        _uiState.update { it.copy(verifiedContacts = updated) }
+        return autoContact
     }
 
     private fun initializeSecuritySubsystem() {
@@ -323,7 +445,7 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 true
             }
             ZeroTraceScreen.CHAT -> {
-                terminateActiveChatSession()
+                navigateBackToChatsPreservingSession()
                 true
             }
             ZeroTraceScreen.CONTACT_VERIFICATION -> {
@@ -709,20 +831,22 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             return
         }
 
-        // If a warm session is already active for this peer, open CHAT immediately
-        val existingHandle = _uiState.value.activeSessionHandle
-        val existingPeer = _uiState.value.activePeerContact
-        if (existingHandle != null && existingPeer != null &&
-            existingPeer.onionAddress.equals(normalizedContact.onionAddress, ignoreCase = true)
-        ) {
+        // Check if a live P2P session or warm session is already active for this peer
+        val existingHandle = TorOnionTransportManager.getActiveRealPeerSessionHandle(normalizedContact.onionAddress)
+            ?: _uiState.value.activeSessionHandle?.takeIf {
+                _uiState.value.activePeerContact?.onionAddress.equals(normalizedContact.onionAddress, ignoreCase = true)
+            }
+        if (existingHandle != null) {
             val volatileMsgs = RustCoreBridge.getVolatileMessages(existingHandle)
             val metrics = RustCoreBridge.getSessionMetrics(existingHandle)
             if (metrics != null) {
+                syncVolatileMessagesToRichConversation(normalizedContact.onionAddress, volatileMsgs)
                 _uiState.update { state ->
                     val clearedUnread = state.unreadCountByOnion.toMutableMap().apply {
                         put(normalizedContact.onionAddress, 0)
                     }
                     state.copy(
+                        activeSessionHandle = existingHandle,
                         activePeerContact = normalizedContact,
                         activeChatMessages = volatileMsgs,
                         activeRatchetMetrics = metrics,
@@ -736,16 +860,24 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
             }
         }
 
-        viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    statusBannerMessage = isHi(
-                        "${normalizedContact.alias} के साथ हाइब्रिड PQ हैंडशेक स्थापित किया जा रहा है…",
-                        "Establishing ZT-PQXDH-P2P-v1 hybrid handshake with ${normalizedContact.alias}…"
-                    ),
-                    errorBannerMessage = null
-                )
+        // Open the Chat screen immediately and establish the P2P session over the Hotspot/LAN circuit
+        _uiState.update { state ->
+            val clearedUnread = state.unreadCountByOnion.toMutableMap().apply {
+                put(normalizedContact.onionAddress, 0)
             }
+            state.copy(
+                activePeerContact = normalizedContact,
+                unreadCountByOnion = clearedUnread,
+                currentScreen = ZeroTraceScreen.CHAT,
+                statusBannerMessage = isHi(
+                    "${normalizedContact.alias} के साथ हाइब्रिड PQ हैंडशेक स्थापित किया जा रहा है…",
+                    "Connecting ZT-PQXDH-P2P-v1 circuit with ${normalizedContact.alias}…"
+                ),
+                errorBannerMessage = null
+            )
+        }
+
+        viewModelScope.launch {
             SessionService.startServiceIfPermitted(appContext)
             val result = TorOnionTransportManager.establishAuthenticatedPeerSession(normalizedContact)
             result.fold(
@@ -771,11 +903,29 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                 },
                 onFailure = { err ->
-                    _uiState.update {
-                        it.copy(
-                            statusBannerMessage = null,
-                            errorBannerMessage = err.message ?: "Failed to establish authenticated session"
-                        )
+                    // Check if an incoming peer handshake succeeded concurrently while we were connecting
+                    val concurrentHandle = TorOnionTransportManager.getActiveRealPeerSessionHandle(normalizedContact.onionAddress)
+                    if (concurrentHandle != null) {
+                        val volatileMsgs = RustCoreBridge.getVolatileMessages(concurrentHandle)
+                        val metrics = RustCoreBridge.getSessionMetrics(concurrentHandle)
+                        syncVolatileMessagesToRichConversation(normalizedContact.onionAddress, volatileMsgs)
+                        _uiState.update { state ->
+                            state.copy(
+                                activeSessionHandle = concurrentHandle,
+                                activePeerContact = normalizedContact,
+                                activeChatMessages = volatileMsgs,
+                                activeRatchetMetrics = metrics,
+                                statusBannerMessage = null,
+                                errorBannerMessage = null
+                            )
+                        }
+                    } else {
+                        _uiState.update {
+                            it.copy(
+                                statusBannerMessage = err.message ?: "Waiting for peer on Hotspot/Wi-Fi P2P circuit…",
+                                errorBannerMessage = null
+                            )
+                        }
                     }
                 }
             )
@@ -783,7 +933,6 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun sendEphemeralChatMessage(messageText: String, forcePqBraidStep: Boolean = false) {
-        val handle = _uiState.value.activeSessionHandle ?: return
         val contact = _uiState.value.activePeerContact ?: return
         val trimmed = messageText.trim()
         if (trimmed.isEmpty()) return
@@ -791,13 +940,33 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
         val replyTarget = _uiState.value.replyingToMessage
 
         viewModelScope.launch {
+            var handle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress)
+                ?: _uiState.value.activeSessionHandle
+
+            if (handle == null) {
+                val connectRes = TorOnionTransportManager.establishAuthenticatedPeerSession(contact)
+                handle = connectRes.getOrNull()
+                    ?: TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress)
+                if (handle == null) {
+                    _uiState.update {
+                        it.copy(
+                            errorBannerMessage = connectRes.exceptionOrNull()?.message
+                                ?: "Peer device is not reachable yet on Hotspot / Wi-Fi P2P circuit."
+                        )
+                    }
+                    return@launch
+                }
+            }
+
             val result = TorOnionTransportManager.sendEncryptedMessageOverCircuit(
                 sessionHandle = handle,
                 plaintext = trimmed,
-                forcePqBraidStep = forcePqBraidStep
+                forcePqBraidStep = forcePqBraidStep,
+                contact = contact
             )
             result.fold(
                 onSuccess = { updatedMessages ->
+                    val effectiveHandle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress) ?: handle
                     syncVolatileMessagesToRichConversation(
                         onionAddress = contact.onionAddress,
                         volatileMessages = updatedMessages,
@@ -805,9 +974,11 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                     )
                     _uiState.update {
                         it.copy(
+                            activeSessionHandle = effectiveHandle,
                             activeChatMessages = updatedMessages,
-                            activeRatchetMetrics = RustCoreBridge.getSessionMetrics(handle),
+                            activeRatchetMetrics = RustCoreBridge.getSessionMetrics(effectiveHandle),
                             replyingToMessage = null,
+                            statusBannerMessage = null,
                             errorBannerMessage = null
                         )
                     }
@@ -938,7 +1109,8 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
                 val sendRes = TorOnionTransportManager.sendEncryptedMessageOverCircuit(
                     sessionHandle = handle,
                     plaintext = wireNotice,
-                    forcePqBraidStep = false
+                    forcePqBraidStep = false,
+                    contact = contact
                 )
 
                 sendRes.fold(
@@ -1046,7 +1218,29 @@ class ZeroTraceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun triggerManualPqBraidRatchetStep() {
-        sendEphemeralChatMessage("[PQ-BRAID-REKEY] Advancing ML-KEM-1024 + X25519 epoch", forcePqBraidStep = true)
+        val contact = _uiState.value.activePeerContact ?: return
+        val liveHandle = TorOnionTransportManager.getActiveRealPeerSessionHandle(contact.onionAddress)
+            ?: _uiState.value.activeSessionHandle
+        if (liveHandle == null || !TorOnionTransportManager.isPeerConnectedOnMesh(contact.onionAddress)) {
+            startAuthenticatedSessionWithContact(contact)
+        } else {
+            sendEphemeralChatMessage("[PQ-BRAID-REKEY] Advancing ML-KEM-1024 + X25519 epoch", forcePqBraidStep = true)
+        }
+    }
+
+    fun navigateBackToChatsPreservingSession() {
+        _uiState.update {
+            it.copy(
+                currentScreen = ZeroTraceScreen.HOME,
+                selectedBottomTab = MainBottomTab.CHATS,
+                replyingToMessage = null,
+                inspectedMessageInfo = null,
+                mediaPreviewMessage = null,
+                showAttachmentSheet = false,
+                statusBannerMessage = null,
+                errorBannerMessage = null
+            )
+        }
     }
 
     fun terminateActiveChatSession() {

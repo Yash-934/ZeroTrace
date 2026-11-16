@@ -1238,6 +1238,25 @@ object RustCoreBridge {
         }
     }
 
+    fun findSessionHandleBySessionId(sessionIdHex: String): Long? {
+        return activeSessions.values.firstOrNull {
+            it.sessionIdHex.equals(sessionIdHex, ignoreCase = true)
+        }?.handle
+    }
+
+    fun findSessionHandleByPeerOnion(peerOnion: String): Long? {
+        return activeSessions.values
+            .filter { it.peerOnion.equals(peerOnion, ignoreCase = true) }
+            .maxByOrNull { it.handle }
+            ?.handle
+    }
+
+    @Synchronized
+    fun signPeerHelloTranscript(transcript: ByteArray): ByteArray? {
+        val holder = activeIdentity ?: return null
+        return signEd25519(holder.ed25519Sk, transcript)
+    }
+
     /**
      * Destroys a single session handle and zeroizes all associated ratchet keys and chat messages.
      */

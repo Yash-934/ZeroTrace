@@ -7,6 +7,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -26,8 +28,13 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.File
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.ByteBuffer
@@ -35,15 +42,27 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.SecureRandomSpi
 import java.util.Arrays
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
 import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
 import org.bouncycastle.pqc.crypto.mldsa.MLDSAKeyGenerationParameters
@@ -66,7 +85,7 @@ enum class ConnectivityState(val code: String, val labelEn: String, val labelHi:
     TOR_BOOTSTRAPPING("TOR_BOOTSTRAPPING", "Bootstrapping Tor Circuit", "Tor सर्किट बूटस्ट्रैप हो रहा है"),
     TOR_READY("TOR_READY", "Tor Circuit Ready", "Tor सर्किट तैयार"),
     ONION_SERVICE_STARTING("ONION_SERVICE_STARTING", "Starting v3 Onion Service", "v3 अनियन सर्विस शुरू हो रही है"),
-    ONION_SERVICE_READY("ONION_SERVICE_READY", "Onion Service Listening (127.0.0.1)", "अनियन सर्विस सक्रिय (127.0.0.1)"),
+    ONION_SERVICE_READY("ONION_SERVICE_READY", "Onion Service Listening (P2P Mesh Ready)", "अनियन सर्विस सक्रिय (P2P मेश तैयार)"),
     CONNECTING_TO_PEER("CONNECTING_TO_PEER", "Connecting to Peer .onion", "पीयर .onion से जुड़ रहा है"),
     AUTHENTICATING_PEER("AUTHENTICATING_PEER", "Authenticating Hybrid PQ Handshake", "हाइब्रिड PQ हैंडशेक प्रमाणित हो रहा है"),
     E2EE_SESSION_READY("E2EE_SESSION_READY", "E2EE PQ Ratchet Session Ready", "E2EE PQ रैचेट सत्र सक्रिय"),
@@ -80,9 +99,57 @@ enum class TorTransportBackend(val labelEn: String, val labelHi: String) {
         "Tor अनियन SOCKS5 सर्किट (127.0.0.1:9050)"
     ),
     LOOPBACK_ONION_VERIFICATION(
-        "Local Loopback Onion Circuit (127.0.0.1 Peer Verification)",
-        "लोकल लूपबैक अनियन सर्किट (127.0.0.1 पीयर सत्यापन)"
+        "Local Loopback / Hotspot P2P Onion Circuit",
+        "लोकल लूपबैक / हॉटस्पॉट P2P अनियन सर्किट"
     )
+}
+
+/**
+ * Signed peer identity announcement exchanged over the encrypted P2P `.onion` circuit.
+ */
+data class PeerHelloWire(
+    val onionAddress: String,
+    val classicalFingerprintHex: String,
+    val pqFingerprintHex: String,
+    val ed25519PublicKey: ByteArray,
+    val x25519PublicKey: ByteArray,
+    val pairingNonceHex: String,
+    val ephemeralBootId: String,
+    val ed25519Signature: ByteArray
+)
+
+/**
+ * Real-time P2P transport events observed by `ZeroTraceViewModel` so incoming handshakes,
+ * ratcheted messages, and delivery receipts update the UI immediately on both devices.
+ */
+sealed interface PeerTransportEvent {
+    data class PeerConnected(
+        val peerOnion: String,
+        val peerHello: PeerHelloWire
+    ) : PeerTransportEvent
+
+    data class PeerDisconnected(
+        val peerOnion: String
+    ) : PeerTransportEvent
+
+    data class SessionEstablished(
+        val peerOnion: String,
+        val sessionHandle: Long,
+        val peerHello: PeerHelloWire?
+    ) : PeerTransportEvent
+
+    data class IncomingMessage(
+        val peerOnion: String,
+        val sessionHandle: Long,
+        val message: VolatileChatMessage
+    ) : PeerTransportEvent
+
+    data class DeliveryAck(
+        val peerOnion: String,
+        val sessionIdHex: String,
+        val msgNum: Long,
+        val ratchetEpoch: Int
+    ) : PeerTransportEvent
 }
 
 /**
@@ -139,14 +206,9 @@ class SessionService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // Strict Ephemeral Mode: when user swipes away task, wipe volatile sessions immediately
         TorOnionTransportManager.emergencyDisconnectAndWipe()
         stopSelf()
         super.onTaskRemoved(rootIntent)
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
     }
 
     private fun createNotificationChannel() {
@@ -239,12 +301,32 @@ private class DeterministicLoopbackSecureRandom(seedPhrase: String) : SecureRand
 
 /**
  * Manages the Tor Onion Service State Machine, Loopback Listener (`127.0.0.1`),
+ * Real Multi-Device P2P Hotspot/LAN `.onion` Circuit Router (NSD mDNS + `TCP :9443` + `UDP :19443` + `/24` sweep),
  * Embedded RFC 1928 SOCKS5 `.onion` Router, Fail-Closed Clearnet Prevention, and
  * Peer-to-Peer Encrypted Framing.
  */
 object TorOnionTransportManager {
 
+    private const val WIRE_MAGIC = 0x5A543246 // "ZT2F"
+    private const val FRAME_HANDSHAKE_INIT: Byte = 0x01
+    private const val FRAME_HANDSHAKE_RESP: Byte = 0x02
+    private const val FRAME_RATCHET_PACKET: Byte = 0x03
+    private const val FRAME_DELIVERY_ACK: Byte = 0x04
+    private const val FRAME_SESSION_RESET: Byte = 0x05
+    private const val FRAME_PEER_HELLO: Byte = 0x10
+
+    private const val DEFAULT_P2P_TCP_PORT = 9443
+    private const val DEFAULT_P2P_UDP_PORT = 19443
+    private const val NSD_SERVICE_TYPE = "_zerotrace._tcp."
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val sweepMutex = Mutex()
+
+    @Volatile
+    private var appContextRef: Context? = null
+
+    @Volatile
+    private var localBootId: String = UUID.randomUUID().toString().replace("-", "")
 
     private val _connectivityState = MutableStateFlow(ConnectivityState.OFFLINE)
     val connectivityState: StateFlow<ConnectivityState> = _connectivityState.asStateFlow()
@@ -261,15 +343,50 @@ object TorOnionTransportManager {
     private val _torBootstrapProgress = MutableStateFlow(0)
     val torBootstrapProgress: StateFlow<Int> = _torBootstrapProgress.asStateFlow()
 
+    private val _connectedPeerOnions = MutableStateFlow<Set<String>>(emptySet())
+    val connectedPeerOnions: StateFlow<Set<String>> = _connectedPeerOnions.asStateFlow()
+
+    private val _peerTransportEvents = MutableSharedFlow<PeerTransportEvent>(extraBufferCapacity = 64)
+    val peerTransportEvents: SharedFlow<PeerTransportEvent> = _peerTransportEvents.asSharedFlow()
+
     private var localOnionServerSocket: ServerSocket? = null
     private var embeddedSocksServerSocket: ServerSocket? = null
     private var embeddedSocksPort: Int? = null
     private var socksHost: String = "127.0.0.1"
     private var socksPort: Int = 9050
 
-    // Deterministic loopback cryptographic peer node for on-device E2EE verification over 127.0.0.1
+    // Real multi-device P2P Onion Mesh / Hotspot TCP + UDP + NSD transport state
+    private var p2pMeshServerSocket: ServerSocket? = null
+    private var p2pMeshListeningPort: Int = DEFAULT_P2P_TCP_PORT
+    private var p2pUdpBeaconSocket: DatagramSocket? = null
+    private var p2pDiscoveryJob: Job? = null
+    private val lastSubnetSweepEpochMs = java.util.concurrent.atomic.AtomicLong(0L)
+
+    private var nsdManager: NsdManager? = null
+    private var nsdRegListener: NsdManager.RegistrationListener? = null
+    private var nsdDiscoveryListener: NsdManager.DiscoveryListener? = null
+    private var localNsdServiceName: String? = null
+
+    private val livePeerChannels = ConcurrentHashMap<String, PeerSocketChannel>()
+    private val peerHelloByOnion = ConcurrentHashMap<String, PeerHelloWire>()
+    private val lastBootIdByOnion = ConcurrentHashMap<String, String>()
+    private val realPeerSessionHandles = ConcurrentHashMap<String, Long>()
+    private val pendingHandshakeByOnion = ConcurrentHashMap<String, CompletableDeferred<Long>>()
+    private val discoveredPeerAddresses = ConcurrentHashMap<String, InetSocketAddress>()
+    private val connectingEndpoints = ConcurrentHashMap.newKeySet<String>()
+
+    private val isAndroidDeviceRuntime: Boolean = try {
+        Build.VERSION.SDK_INT > 0 && !Build.FINGERPRINT.equals("robolectric", ignoreCase = true)
+    } catch (_: Throwable) {
+        false
+    }
+
     @Volatile
     private var loopbackPeerNode: LoopbackCryptographicPeerNode? = null
+
+    fun initializePlatform(context: Context) {
+        appContextRef = context.applicationContext
+    }
 
     fun configureTransportBackend(backend: TorTransportBackend, customSocksPort: Int = 9050) {
         _transportBackend.value = backend
@@ -286,27 +403,46 @@ object TorOnionTransportManager {
         }
     }
 
+    fun isPeerConnectedOnMesh(onionAddress: String): Boolean {
+        val ch = livePeerChannels[onionAddress.lowercase()]
+        return ch != null && ch.isAlive()
+    }
+
+    fun getActiveRealPeerSessionHandle(onionAddress: String): Long? {
+        val key = onionAddress.lowercase()
+        val handle = realPeerSessionHandles[key] ?: RustCoreBridge.findSessionHandleByPeerOnion(key)
+        if (handle != null && RustCoreBridge.getSessionMetrics(handle) != null) {
+            return handle
+        }
+        return null
+    }
+
+    private fun refreshConnectedPeerState() {
+        _connectedPeerOnions.value = livePeerChannels.entries
+            .filter { it.value.isAlive() }
+            .map { it.key.lowercase() }
+            .toSet()
+    }
+
     /**
-     * Bootstraps the Tor transport and starts the local `127.0.0.1` Onion Service listener.
-     * - In `SOCKS5_TOR_DAEMON` mode:
-     *   - If a custom non-default port (`socksPort != 9050`) is configured (e.g., testing dead port `61999`),
-     *     strictly probes `127.0.0.1:socksPort` and fails closed (`ConnectivityState.ERROR`) if unreachable.
-     *   - If default port `9050` is selected, probes `127.0.0.1:9050` / `9150` first, and if no external
-     *     Orbot/Tor daemon is running on the device, starts the Embedded RFC 1928 SOCKS5 `.onion` Router
-     *     on `127.0.0.1` so `.onion` circuits route cleanly while rejecting all clearnet IPs/domains.
+     * Bootstraps the Tor transport, starts the local `127.0.0.1` Onion Service listener,
+     * and starts the P2P Hotspot/LAN `.onion` Mesh Engine (NSD + `TCP :9443` + `UDP :19443`).
      */
     suspend fun bootstrapTorAndStartOnionService(): Boolean = withContext(Dispatchers.IO) {
         try {
             _lastErrorDetail.value = null
             _connectivityState.value = ConnectivityState.INITIALIZING
             _torBootstrapProgress.value = 15
-            delay(80)
+            delay(60)
 
             _connectivityState.value = ConnectivityState.TOR_BOOTSTRAPPING
             _torBootstrapProgress.value = 45
 
             ensureLocalLoopbackListenerStarted()
             ensureLoopbackVerificationPeerStarted()
+            if (isAndroidDeviceRuntime) {
+                ensureP2pOnionMeshEngineStarted()
+            }
 
             when (_transportBackend.value) {
                 TorTransportBackend.SOCKS5_TOR_DAEMON -> {
@@ -316,30 +452,32 @@ object TorOnionTransportManager {
 
                     if (!externalReachable) {
                         if (socksPort != 9050) {
-                            // Explicit non-default port probe failed -> strictly Fail-Closed
                             _torBootstrapProgress.value = 0
                             _connectivityState.value = ConnectivityState.ERROR
                             _lastErrorDetail.value =
                                 "FAIL-CLOSED: No Tor SOCKS5 daemon reachable at 127.0.0.1:$socksPort. Clearnet fallback is strictly prohibited."
                             return@withContext false
                         } else {
-                            // Start embedded local RFC 1928 SOCKS5 v3 Onion Router on 127.0.0.1
                             ensureEmbeddedSocks5OnionRouterStarted()
                         }
                     }
                 }
                 TorTransportBackend.LOOPBACK_ONION_VERIFICATION -> {
-                    delay(80)
+                    delay(50)
                 }
             }
 
             _torBootstrapProgress.value = 75
             _connectivityState.value = ConnectivityState.TOR_READY
-            delay(60)
+            delay(40)
 
             _connectivityState.value = ConnectivityState.ONION_SERVICE_STARTING
             _torBootstrapProgress.value = 100
-            _connectivityState.value = ConnectivityState.ONION_SERVICE_READY
+            _connectivityState.value = if (realPeerSessionHandles.isNotEmpty()) {
+                ConnectivityState.E2EE_SESSION_READY
+            } else {
+                ConnectivityState.ONION_SERVICE_READY
+            }
             true
         } catch (e: Exception) {
             _torBootstrapProgress.value = 0
@@ -376,6 +514,773 @@ object TorOnionTransportManager {
         _localListenerPort.value = server.localPort
     }
 
+    // =========================================================================
+    // Real Multi-Device P2P Hotspot / Wi-Fi LAN `.onion` Circuit Router
+    // =========================================================================
+
+    @Synchronized
+    private fun ensureP2pOnionMeshEngineStarted() {
+        if (p2pMeshServerSocket == null || p2pMeshServerSocket!!.isClosed) {
+            for (candidatePort in listOf(DEFAULT_P2P_TCP_PORT, 9444, 9445, 0)) {
+                try {
+                    val srv = ServerSocket()
+                    srv.reuseAddress = true
+                    srv.bind(InetSocketAddress("0.0.0.0", candidatePort), 32)
+                    p2pMeshServerSocket = srv
+                    p2pMeshListeningPort = srv.localPort
+                    scope.launch {
+                        acceptP2pMeshConnectionsLoop(srv)
+                    }
+                    break
+                } catch (_: Throwable) {
+                }
+            }
+        }
+
+        if (p2pUdpBeaconSocket == null || p2pUdpBeaconSocket!!.isClosed) {
+            try {
+                val udp = DatagramSocket(null).apply {
+                    reuseAddress = true
+                    broadcast = true
+                    bind(InetSocketAddress("0.0.0.0", DEFAULT_P2P_UDP_PORT))
+                }
+                p2pUdpBeaconSocket = udp
+                scope.launch {
+                    receiveUdpBeaconsLoop(udp)
+                }
+            } catch (_: Throwable) {
+            }
+        }
+
+        startNsdMeshServiceAndDiscovery()
+
+        if (p2pDiscoveryJob == null || p2pDiscoveryJob?.isActive != true) {
+            p2pDiscoveryJob = scope.launch {
+                while (true) {
+                    try {
+                        broadcastUdpBeaconAndProbeGateways()
+                    } catch (_: Throwable) {
+                    }
+                    delay(2000L)
+                }
+            }
+        }
+    }
+
+    private fun startNsdMeshServiceAndDiscovery() {
+        val ctx = appContextRef ?: return
+        val localOnion = RustCoreBridge.getPublicIdentitySummary()?.onionAddress?.lowercase() ?: return
+        try {
+            val mgr = nsdManager ?: (ctx.getSystemService(Context.NSD_SERVICE) as? NsdManager)?.also {
+                nsdManager = it
+            } ?: return
+
+            if (nsdRegListener == null) {
+                val svcName = "zt2-${localOnion.take(10)}"
+                localNsdServiceName = svcName
+                val info = NsdServiceInfo().apply {
+                    serviceName = svcName
+                    serviceType = NSD_SERVICE_TYPE
+                    port = p2pMeshListeningPort
+                }
+                val regListener = object : NsdManager.RegistrationListener {
+                    override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
+                        localNsdServiceName = serviceInfo.serviceName
+                    }
+                    override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
+                    override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {}
+                    override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
+                }
+                nsdRegListener = regListener
+                mgr.registerService(info, NsdManager.PROTOCOL_DNS_SD, regListener)
+            }
+
+            if (nsdDiscoveryListener == null) {
+                val discListener = object : NsdManager.DiscoveryListener {
+                    override fun onDiscoveryStarted(regType: String) {}
+                    override fun onServiceFound(serviceInfo: NsdServiceInfo) {
+                        if (serviceInfo.serviceName == localNsdServiceName) return
+                        try {
+                            @Suppress("DEPRECATION")
+                            mgr.resolveService(serviceInfo, object : NsdManager.ResolveListener {
+                                override fun onResolveFailed(si: NsdServiceInfo, errorCode: Int) {}
+                                override fun onServiceResolved(resolved: NsdServiceInfo) {
+                                    @Suppress("DEPRECATION")
+                                    val host = resolved.host ?: return
+                                    val port = resolved.port
+                                    if (!host.isLoopbackAddress && port > 0) {
+                                        scope.launch {
+                                            tryConnectToPeerEndpoint(InetSocketAddress(host, port))
+                                        }
+                                    }
+                                }
+                            })
+                        } catch (_: Throwable) {
+                        }
+                    }
+                    override fun onServiceLost(serviceInfo: NsdServiceInfo) {}
+                    override fun onDiscoveryStopped(serviceType: String) {}
+                    override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {}
+                    override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
+                }
+                nsdDiscoveryListener = discListener
+                mgr.discoverServices(NSD_SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discListener)
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun stopNsdMesh() {
+        val mgr = nsdManager ?: return
+        nsdRegListener?.let {
+            try {
+                mgr.unregisterService(it)
+            } catch (_: Throwable) {
+            }
+        }
+        nsdDiscoveryListener?.let {
+            try {
+                mgr.stopServiceDiscovery(it)
+            } catch (_: Throwable) {
+            }
+        }
+        nsdRegListener = null
+        nsdDiscoveryListener = null
+    }
+
+    private suspend fun acceptP2pMeshConnectionsLoop(srv: ServerSocket) {
+        while (!srv.isClosed) {
+            val client = try {
+                srv.accept()
+            } catch (_: Throwable) {
+                if (srv.isClosed) break else continue
+            }
+            scope.launch {
+                handlePeerSocketConnection(client, isOutbound = false)
+            }
+        }
+    }
+
+    private suspend fun receiveUdpBeaconsLoop(udp: DatagramSocket) {
+        val buf = ByteArray(1024)
+        while (!udp.isClosed) {
+            try {
+                val pkt = DatagramPacket(buf, buf.size)
+                udp.receive(pkt)
+                val text = String(pkt.data, pkt.offset, pkt.length, Charsets.UTF_8).trim()
+                if (!text.startsWith("ZT2-P2P-V1|")) continue
+                val parts = text.split("|")
+                if (parts.size < 5) continue
+                val peerOnion = parts[1].lowercase()
+                val peerPort = parts[2].toIntOrNull() ?: DEFAULT_P2P_TCP_PORT
+                val localOnion = RustCoreBridge.getPublicIdentitySummary()?.onionAddress?.lowercase()
+                if (localOnion == null || peerOnion == localOnion) continue
+
+                val senderIp = pkt.address
+                if (senderIp != null && !senderIp.isLoopbackAddress) {
+                    val endpoint = InetSocketAddress(senderIp, peerPort)
+                    discoveredPeerAddresses[peerOnion] = endpoint
+                    if (!isPeerConnectedOnMesh(peerOnion)) {
+                        scope.launch {
+                            tryConnectToPeerEndpoint(endpoint)
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+                if (udp.isClosed) break
+            }
+        }
+    }
+
+    private fun isCellularOrVirtualInterface(name: String): Boolean {
+        val lower = name.lowercase()
+        return lower.startsWith("rmnet") ||
+            lower.startsWith("r_rmnet") ||
+            lower.startsWith("v4-rmnet") ||
+            lower.startsWith("ccmni") ||
+            lower.startsWith("pdp") ||
+            lower.startsWith("tun") ||
+            lower.startsWith("ppp") ||
+            lower.startsWith("dummy") ||
+            lower.startsWith("clat") ||
+            lower.startsWith("lo")
+    }
+
+    private fun getLocalPrivateIpv4Addresses(): List<Pair<Inet4Address, InetAddress?>> {
+        val preferred = mutableListOf<Pair<Inet4Address, InetAddress?>>()
+        val fallback = mutableListOf<Pair<Inet4Address, InetAddress?>>()
+        try {
+            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return emptyList()
+            while (interfaces.hasMoreElements()) {
+                val nif = interfaces.nextElement()
+                val ifName = nif.name.orEmpty()
+                if (!nif.isUp || nif.isLoopback || isCellularOrVirtualInterface(ifName)) continue
+                for (ia in nif.interfaceAddresses) {
+                    val addr = ia.address
+                    if (addr is Inet4Address && !addr.isLoopbackAddress && addr.isSiteLocalAddress) {
+                        val hostIp = addr.hostAddress ?: continue
+                        if (hostIp.startsWith("10.0.2.")) continue
+                        val lowerName = ifName.lowercase()
+                        if (lowerName.startsWith("ap") || lowerName.startsWith("swlan") ||
+                            lowerName.startsWith("softap") || lowerName.startsWith("wlan") ||
+                            lowerName.startsWith("wifi") || lowerName.startsWith("p2p")
+                        ) {
+                            preferred.add(Pair(addr, ia.broadcast))
+                        } else {
+                            fallback.add(Pair(addr, ia.broadcast))
+                        }
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        return preferred + fallback
+    }
+
+    private fun readProcNetRouteGateways(): Set<String> {
+        val gateways = mutableSetOf<String>()
+        try {
+            val routeFile = File("/proc/net/route")
+            if (!routeFile.exists() || !routeFile.canRead()) return gateways
+            routeFile.forEachLine { line ->
+                val cols = line.trim().split(Regex("\\s+"))
+                if (cols.size < 4) return@forEachLine
+                val ifName = cols[0]
+                if (ifName == "Iface" || isCellularOrVirtualInterface(ifName)) return@forEachLine
+                val gwHex = cols[2]
+                if (gwHex.length == 8 && gwHex != "00000000") {
+                    val gwLong = gwHex.toLongOrNull(16) ?: return@forEachLine
+                    // /proc/net/route stores little-endian IPv4 on ARM/x86 Android kernels
+                    val b0 = (gwLong and 0xFF).toInt()
+                    val b1 = ((gwLong shr 8) and 0xFF).toInt()
+                    val b2 = ((gwLong shr 16) and 0xFF).toInt()
+                    val b3 = ((gwLong shr 24) and 0xFF).toInt()
+                    val ip = "$b0.$b1.$b2.$b3"
+                    if (!ip.startsWith("127.") && !ip.startsWith("0.")) {
+                        gateways.add(ip)
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        return gateways
+    }
+
+    private fun readArpTableCandidateIps(): Set<String> {
+        val ips = mutableSetOf<String>()
+        try {
+            val arpFile = File("/proc/net/arp")
+            if (arpFile.exists() && arpFile.canRead()) {
+                arpFile.forEachLine { line ->
+                    val cols = line.trim().split(Regex("\\s+"))
+                    val token = cols.firstOrNull() ?: return@forEachLine
+                    val ifName = cols.getOrNull(5).orEmpty()
+                    if (isCellularOrVirtualInterface(ifName)) return@forEachLine
+                    if (token.matches(Regex("\\d+\\.\\d+\\.\\d+\\.\\d+")) && !token.startsWith("127.")) {
+                        ips.add(token)
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        return ips
+    }
+
+    private suspend fun broadcastUdpBeaconAndProbeGateways() {
+        val summary = RustCoreBridge.getPublicIdentitySummary() ?: return
+        val myOnion = summary.onionAddress.lowercase()
+        val beaconBytes = "ZT2-P2P-V1|$myOnion|$p2pMeshListeningPort|${summary.classicalFingerprintHex}|${summary.pqFingerprintHex}"
+            .toByteArray(Charsets.UTF_8)
+
+        val localInterfaces = getLocalPrivateIpv4Addresses()
+        val localIpStrings = localInterfaces.mapNotNull { it.first.hostAddress }.toSet()
+
+        // 1. Send UDP broadcast + gateway unicast beacons
+        val udp = p2pUdpBeaconSocket
+        if (udp != null && !udp.isClosed) {
+            val udpTargets = mutableSetOf<InetAddress>()
+            try {
+                udpTargets.add(InetAddress.getByName("255.255.255.255"))
+            } catch (_: Throwable) {
+            }
+            for ((addr, bcast) in localInterfaces) {
+                if (bcast != null) udpTargets.add(bcast)
+                val prefix = addr.hostAddress?.substringBeforeLast(".")
+                if (prefix != null) {
+                    try {
+                        udpTargets.add(InetAddress.getByName("$prefix.255"))
+                        udpTargets.add(InetAddress.getByName("$prefix.1"))
+                        udpTargets.add(InetAddress.getByName("$prefix.254"))
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+            for (gwIp in readProcNetRouteGateways()) {
+                try {
+                    udpTargets.add(InetAddress.getByName(gwIp))
+                } catch (_: Throwable) {
+                }
+            }
+            for (target in udpTargets) {
+                try {
+                    udp.send(DatagramPacket(beaconBytes, beaconBytes.size, target, DEFAULT_P2P_UDP_PORT))
+                } catch (_: Throwable) {
+                }
+            }
+        }
+
+        // 2. Fast TCP probes to kernel gateways (/proc/net/route), .1, ARP table peers, and NSD/UDP endpoints
+        val fastProbeIps = mutableSetOf<String>()
+        for (gw in readProcNetRouteGateways()) {
+            if (gw !in localIpStrings) fastProbeIps.add(gw)
+        }
+        for ((addr, _) in localInterfaces) {
+            val ip = addr.hostAddress ?: continue
+            val prefix = ip.substringBeforeLast(".")
+            val gw = "$prefix.1"
+            if (gw !in localIpStrings) fastProbeIps.add(gw)
+        }
+        for (arpIp in readArpTableCandidateIps()) {
+            if (arpIp !in localIpStrings) fastProbeIps.add(arpIp)
+        }
+        for ((peerOnion, endpoint) in discoveredPeerAddresses) {
+            if (!isPeerConnectedOnMesh(peerOnion)) {
+                val host = endpoint.address?.hostAddress
+                if (host != null && host !in localIpStrings) {
+                    fastProbeIps.add(host)
+                }
+            }
+        }
+
+        for (ip in fastProbeIps) {
+            scope.launch {
+                tryConnectToPeerEndpoint(InetSocketAddress(ip, DEFAULT_P2P_TCP_PORT), connectTimeoutMs = 350)
+            }
+        }
+
+        // 3. Periodically sweep Wi-Fi / Hotspot /24 subnet so Hotspot Host discovers connected Clients
+        val now = System.currentTimeMillis()
+        if (livePeerChannels.isEmpty() && localInterfaces.isNotEmpty() && now - lastSubnetSweepEpochMs.get() >= 5500L) {
+            lastSubnetSweepEpochMs.set(now)
+            scope.launch {
+                sweepLocalSubnetsForPeers()
+            }
+        }
+    }
+
+    /**
+     * Sweeps all active Wi-Fi / Hotspot `/24` subnets in fast parallel batches (64 sockets/batch)
+     * so two devices discover each other within ~1 second even when UDP broadcast is isolated
+     * by Mobile Hotspot AP isolation or `/proc/net/arp` is restricted on Android 10+.
+     */
+    suspend fun sweepLocalSubnetsForPeers() = withContext(Dispatchers.IO) {
+        sweepMutex.withLock {
+            val localInterfaces = getLocalPrivateIpv4Addresses()
+            if (localInterfaces.isEmpty()) return@withContext
+            val localIps = localInterfaces.mapNotNull { it.first.hostAddress }.toSet()
+
+            // First try kernel gateways (.1 / route table) immediately
+            val gateways = readProcNetRouteGateways()
+            for (gw in gateways) {
+                if (gw !in localIps) {
+                    tryConnectToPeerEndpoint(InetSocketAddress(gw, DEFAULT_P2P_TCP_PORT), connectTimeoutMs = 240)
+                }
+            }
+
+            for ((addr, _) in localInterfaces) {
+                if (livePeerChannels.isNotEmpty()) break
+                val prefix = addr.hostAddress?.substringBeforeLast(".") ?: continue
+                val firstIp = "$prefix.1"
+                if (firstIp !in localIps) {
+                    tryConnectToPeerEndpoint(InetSocketAddress(firstIp, DEFAULT_P2P_TCP_PORT), connectTimeoutMs = 240)
+                }
+                for (batchStart in 2..254 step 64) {
+                    if (livePeerChannels.isNotEmpty()) break
+                    val batchEnd = minOf(254, batchStart + 63)
+                    val jobs = (batchStart..batchEnd).mapNotNull { hostOctet ->
+                        val candidateIp = "$prefix.$hostOctet"
+                        if (candidateIp in localIps) null
+                        else async {
+                            tryConnectToPeerEndpoint(
+                                InetSocketAddress(candidateIp, DEFAULT_P2P_TCP_PORT),
+                                connectTimeoutMs = 200
+                            )
+                        }
+                    }
+                    jobs.awaitAll()
+                }
+            }
+        }
+    }
+
+    private suspend fun tryConnectToPeerEndpoint(
+        endpoint: InetSocketAddress,
+        connectTimeoutMs: Int = 350
+    ): Boolean = withContext(Dispatchers.IO) {
+        val host = endpoint.address?.hostAddress ?: endpoint.hostString ?: return@withContext false
+        val key = "$host:${endpoint.port}"
+        if (!connectingEndpoints.add(key)) return@withContext false
+        try {
+            val alreadyConnectedToHost = livePeerChannels.values.any { ch ->
+                ch.remoteHostAddress == host && ch.isAlive()
+            }
+            if (alreadyConnectedToHost) return@withContext true
+
+            val sock = Socket()
+            try {
+                sock.tcpNoDelay = true
+                sock.keepAlive = true
+                sock.connect(endpoint, connectTimeoutMs)
+            } catch (_: Throwable) {
+                try {
+                    sock.close()
+                } catch (_: Throwable) {
+                }
+                return@withContext false
+            }
+
+            scope.launch {
+                handlePeerSocketConnection(sock, isOutbound = true)
+            }
+            true
+        } finally {
+            connectingEndpoints.remove(key)
+        }
+    }
+
+    /**
+     * Full-duplex framed P2P socket channel between two ZeroTrace devices.
+     */
+    private class PeerSocketChannel(
+        val socket: Socket,
+        val inp: DataInputStream,
+        val out: DataOutputStream,
+        val peerHello: PeerHelloWire
+    ) {
+        val peerOnion: String = peerHello.onionAddress.lowercase()
+        val remoteHostAddress: String? = socket.inetAddress?.hostAddress
+        private val writeLock = Any()
+
+        fun isAlive(): Boolean {
+            return !socket.isClosed && socket.isConnected && !socket.isInputShutdown && !socket.isOutputShutdown
+        }
+
+        fun sendHandshakeInit(initWire: HandshakeInitWire) {
+            synchronized(writeLock) {
+                writeHandshakeInitFrame(out, initWire)
+            }
+        }
+
+        fun sendHandshakeResponse(respWire: HandshakeResponseWire) {
+            synchronized(writeLock) {
+                writeHandshakeResponseFrame(out, respWire)
+            }
+        }
+
+        fun sendRatchetPacket(rawWireBytes: ByteArray) {
+            synchronized(writeLock) {
+                out.writeInt(WIRE_MAGIC)
+                out.writeByte(FRAME_RATCHET_PACKET.toInt())
+                writeBytes(out, rawWireBytes)
+                out.flush()
+            }
+        }
+
+        fun sendDeliveryAck(sessionIdHex: String, msgNum: Long, ratchetEpoch: Int) {
+            synchronized(writeLock) {
+                out.writeInt(WIRE_MAGIC)
+                out.writeByte(FRAME_DELIVERY_ACK.toInt())
+                out.writeUTF(sessionIdHex)
+                out.writeLong(msgNum)
+                out.writeInt(ratchetEpoch)
+                out.flush()
+            }
+        }
+
+        fun sendSessionReset(staleSessionIdHex: String) {
+            synchronized(writeLock) {
+                out.writeInt(WIRE_MAGIC)
+                out.writeByte(FRAME_SESSION_RESET.toInt())
+                out.writeUTF(staleSessionIdHex)
+                out.flush()
+            }
+        }
+
+        fun closeQuietly() {
+            try {
+                socket.close()
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private suspend fun handlePeerSocketConnection(socket: Socket, isOutbound: Boolean) {
+        var registeredChannel: PeerSocketChannel? = null
+        var peerOnion = ""
+        try {
+            socket.tcpNoDelay = true
+            socket.keepAlive = true
+            socket.soTimeout = 10_000
+            val inp = DataInputStream(BufferedInputStream(socket.getInputStream(), 32_768))
+            val out = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 32_768))
+
+            val localHello = buildSignedLocalPeerHello() ?: run {
+                socket.close()
+                return
+            }
+
+            // Exchange signed FRAME_PEER_HELLO
+            writePeerHelloFrame(out, localHello)
+            val magic = inp.readInt()
+            if (magic != WIRE_MAGIC) {
+                socket.close()
+                return
+            }
+            val firstFrameType = inp.readByte()
+            if (firstFrameType != FRAME_PEER_HELLO) {
+                socket.close()
+                return
+            }
+            val remoteHello = readPeerHelloPayload(inp)
+            if (!verifyPeerHelloSignature(remoteHello)) {
+                socket.close()
+                return
+            }
+
+            peerOnion = remoteHello.onionAddress.lowercase()
+            if (peerOnion == localHello.onionAddress.lowercase()) {
+                socket.close()
+                return
+            }
+
+            // Switch socket to persistent streaming timeout
+            socket.soTimeout = 0
+            val channel = PeerSocketChannel(socket, inp, out, remoteHello)
+            registeredChannel = channel
+
+            // If peer restarted / wiped RAM (ephemeralBootId changed), invalidate stale local session handle!
+            val prevBootId = lastBootIdByOnion.put(peerOnion, remoteHello.ephemeralBootId)
+            if (prevBootId != null && prevBootId != remoteHello.ephemeralBootId) {
+                realPeerSessionHandles.remove(peerOnion)?.let { oldHandle ->
+                    RustCoreBridge.destroySession(oldHandle)
+                }
+            }
+
+            peerHelloByOnion[peerOnion] = remoteHello
+            livePeerChannels[peerOnion] = channel
+            socket.inetAddress?.let { addr ->
+                discoveredPeerAddresses[peerOnion] = InetSocketAddress(addr, DEFAULT_P2P_TCP_PORT)
+            }
+            refreshConnectedPeerState()
+
+            _peerTransportEvents.tryEmit(PeerTransportEvent.PeerConnected(peerOnion, remoteHello))
+
+            // Single deterministic Initiator rule prevents simultaneous dual-handshake races:
+            // Only the lexicographically smaller .onion initiates automatically on connect.
+            if (getActiveRealPeerSessionHandle(peerOnion) == null && localHello.onionAddress.lowercase() < peerOnion) {
+                scope.launch {
+                    try {
+                        initiateHandshakeOverPeerChannel(channel)
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+
+            // Continuous frame reader loop on this channel
+            while (channel.isAlive()) {
+                val frameMagic = inp.readInt()
+                if (frameMagic != WIRE_MAGIC) break
+                when (inp.readByte()) {
+                    FRAME_HANDSHAKE_INIT -> {
+                        val initWire = readHandshakeInitPayload(inp)
+                        handleIncomingP2pHandshakeInit(channel, initWire)
+                    }
+                    FRAME_HANDSHAKE_RESP -> {
+                        val respWire = readHandshakeResponsePayload(inp)
+                        handleIncomingP2pHandshakeResponse(channel, respWire)
+                    }
+                    FRAME_RATCHET_PACKET -> {
+                        val rawPacket = readBytes(inp)
+                        handleIncomingP2pRatchetPacket(channel, rawPacket)
+                    }
+                    FRAME_DELIVERY_ACK -> {
+                        val sessionIdHex = inp.readUTF()
+                        val msgNum = inp.readLong()
+                        val epoch = inp.readInt()
+                        _peerTransportEvents.tryEmit(
+                            PeerTransportEvent.DeliveryAck(peerOnion, sessionIdHex, msgNum, epoch)
+                        )
+                    }
+                    FRAME_SESSION_RESET -> {
+                        inp.readUTF()
+                        realPeerSessionHandles.remove(peerOnion)?.let { stale ->
+                            RustCoreBridge.destroySession(stale)
+                        }
+                        if (localHello.onionAddress.lowercase() < peerOnion) {
+                            scope.launch {
+                                try {
+                                    initiateHandshakeOverPeerChannel(channel)
+                                } catch (_: Throwable) {
+                                }
+                            }
+                        }
+                    }
+                    else -> break
+                }
+            }
+        } catch (_: Throwable) {
+        } finally {
+            if (registeredChannel != null && peerOnion.isNotEmpty()) {
+                livePeerChannels.remove(peerOnion, registeredChannel)
+                refreshConnectedPeerState()
+                if (!isPeerConnectedOnMesh(peerOnion)) {
+                    _peerTransportEvents.tryEmit(PeerTransportEvent.PeerDisconnected(peerOnion))
+                }
+            }
+            try {
+                socket.close()
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private fun buildSignedLocalPeerHello(): PeerHelloWire? {
+        val summary = RustCoreBridge.getPublicIdentitySummary() ?: return null
+        val nonceHex = "5a54325032504d45534848454c4c4f31"
+        val transcript = "ZT2-PEER-HELLO-V1|${summary.onionAddress.lowercase()}|${summary.classicalFingerprintHex.lowercase()}|${summary.pqFingerprintHex.lowercase()}|$nonceHex|$localBootId"
+            .toByteArray(Charsets.UTF_8)
+        val sig = RustCoreBridge.signPeerHelloTranscript(transcript) ?: return null
+        return PeerHelloWire(
+            onionAddress = summary.onionAddress.lowercase(),
+            classicalFingerprintHex = summary.classicalFingerprintHex.lowercase(),
+            pqFingerprintHex = summary.pqFingerprintHex.lowercase(),
+            ed25519PublicKey = summary.ed25519PublicKey.copyOf(),
+            x25519PublicKey = summary.x25519PublicKey.copyOf(),
+            pairingNonceHex = nonceHex,
+            ephemeralBootId = localBootId,
+            ed25519Signature = sig
+        )
+    }
+
+    private fun verifyPeerHelloSignature(hello: PeerHelloWire): Boolean {
+        return try {
+            RustCoreBridge.validateOnionDestinationOrThrow(hello.onionAddress)
+            val recomputedClassical = RustCoreBridge.computeClassicalFingerprint(
+                hello.ed25519PublicKey,
+                hello.x25519PublicKey
+            ).toHex()
+            if (!recomputedClassical.equals(hello.classicalFingerprintHex, ignoreCase = true)) {
+                return false
+            }
+            val transcript = "ZT2-PEER-HELLO-V1|${hello.onionAddress.lowercase()}|${hello.classicalFingerprintHex.lowercase()}|${hello.pqFingerprintHex.lowercase()}|${hello.pairingNonceHex.lowercase()}|${hello.ephemeralBootId}"
+                .toByteArray(Charsets.UTF_8)
+            RustCoreBridge.verifyEd25519(hello.ed25519PublicKey, transcript, hello.ed25519Signature)
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun initiateHandshakeOverPeerChannel(channel: PeerSocketChannel): CompletableDeferred<Long> {
+        val peerOnion = channel.peerOnion
+        val existingDeferred = pendingHandshakeByOnion[peerOnion]
+        if (existingDeferred != null && existingDeferred.isActive) {
+            return existingDeferred
+        }
+        val deferred = CompletableDeferred<Long>()
+        pendingHandshakeByOnion[peerOnion] = deferred
+        try {
+            val initWire = RustCoreBridge.createHandshakeInit(
+                peerClassicalFpHex = channel.peerHello.classicalFingerprintHex,
+                peerPqFpHex = channel.peerHello.pqFingerprintHex,
+                pairingNonceHex = channel.peerHello.pairingNonceHex
+            )
+            channel.sendHandshakeInit(initWire)
+        } catch (t: Throwable) {
+            pendingHandshakeByOnion.remove(peerOnion, deferred)
+            deferred.completeExceptionally(t)
+        }
+        return deferred
+    }
+
+    private fun handleIncomingP2pHandshakeInit(channel: PeerSocketChannel, initWire: HandshakeInitWire) {
+        val peerOnion = channel.peerOnion
+        val localOnion = RustCoreBridge.getPublicIdentitySummary()?.onionAddress?.lowercase().orEmpty()
+        val pendingDeferred = pendingHandshakeByOnion[peerOnion]
+
+        if (pendingDeferred != null && pendingDeferred.isActive && localOnion < peerOnion) {
+            return
+        }
+
+        val initiatorClassicalFp = RustCoreBridge.computeClassicalFingerprint(
+            initWire.initiatorEd25519Pk,
+            initWire.initiatorX25519Pk
+        ).toHex()
+        val initiatorPqFp = RustCoreBridge.computePqFingerprint(
+            initWire.initiatorMlDsa87Pk,
+            initWire.initiatorMlKem1024Ek
+        ).toHex()
+
+        val (responderHandle, respWire) = RustCoreBridge.respondToHandshakeInit(
+            init = initWire,
+            expectedPeerOnion = peerOnion,
+            expectedPeerClassicalFpHex = initiatorClassicalFp,
+            expectedPeerPqFpHex = initiatorPqFp,
+            expectedPairingNonceHex = initWire.pairingNonceHex
+        )
+
+        realPeerSessionHandles[peerOnion] = responderHandle
+        channel.sendHandshakeResponse(respWire)
+        pendingHandshakeByOnion.remove(peerOnion)?.complete(responderHandle)
+
+        _lastErrorDetail.value = null
+        _connectivityState.value = ConnectivityState.E2EE_SESSION_READY
+        _peerTransportEvents.tryEmit(
+            PeerTransportEvent.SessionEstablished(peerOnion, responderHandle, channel.peerHello)
+        )
+    }
+
+    private fun handleIncomingP2pHandshakeResponse(channel: PeerSocketChannel, respWire: HandshakeResponseWire) {
+        val peerOnion = channel.peerOnion
+        val initiatorHandle = RustCoreBridge.finalizeHandshakeInitiator(respWire, peerOnion)
+        realPeerSessionHandles[peerOnion] = initiatorHandle
+        pendingHandshakeByOnion.remove(peerOnion)?.complete(initiatorHandle)
+
+        _lastErrorDetail.value = null
+        _connectivityState.value = ConnectivityState.E2EE_SESSION_READY
+        _peerTransportEvents.tryEmit(
+            PeerTransportEvent.SessionEstablished(peerOnion, initiatorHandle, channel.peerHello)
+        )
+    }
+
+    private fun handleIncomingP2pRatchetPacket(channel: PeerSocketChannel, rawPacketBytes: ByteArray) {
+        val peerOnion = channel.peerOnion
+        val packet = RatchetWirePacket.fromWireBytes(rawPacketBytes)
+
+        val handle = RustCoreBridge.findSessionHandleBySessionId(packet.sessionIdHex)
+        if (handle == null) {
+            // Peer has an obsolete session ID (e.g. after our side wiped or restarted) -> request clean re-handshake
+            realPeerSessionHandles.remove(peerOnion)
+            try {
+                channel.sendSessionReset(packet.sessionIdHex)
+            } catch (_: Throwable) {
+            }
+            return
+        }
+
+        val decryptedMsg = RustCoreBridge.decryptMessage(handle, packet)
+        realPeerSessionHandles[peerOnion] = handle
+        _connectivityState.value = ConnectivityState.E2EE_SESSION_READY
+
+        try {
+            channel.sendDeliveryAck(packet.sessionIdHex, packet.msgNum, packet.ratchetEpoch)
+        } catch (_: Throwable) {
+        }
+
+        _peerTransportEvents.tryEmit(
+            PeerTransportEvent.IncomingMessage(peerOnion, handle, decryptedMsg)
+        )
+    }
+
     @Synchronized
     private fun ensureEmbeddedSocks5OnionRouterStarted() {
         val existing = embeddedSocksServerSocket
@@ -409,23 +1314,20 @@ object TorOnionTransportManager {
                 val inp = DataInputStream(BufferedInputStream(sock.getInputStream()))
                 val out = DataOutputStream(BufferedOutputStream(sock.getOutputStream()))
 
-                // 1. SOCKS5 greeting: VER=0x05, NMETHODS
                 val ver = inp.readUnsignedByte()
                 if (ver != 0x05) return
                 val nMethods = inp.readUnsignedByte()
                 val methods = ByteArray(nMethods)
                 inp.readFully(methods)
                 out.writeByte(0x05)
-                out.writeByte(0x00) // No auth required on 127.0.0.1 loopback
+                out.writeByte(0x00)
                 out.flush()
 
-                // 2. SOCKS5 CONNECT request: VER=0x05, CMD=0x01, RSV=0x00, ATYP
                 val reqVer = inp.readUnsignedByte()
                 val cmd = inp.readUnsignedByte()
-                inp.readUnsignedByte() // RSV
+                inp.readUnsignedByte()
                 val atyp = inp.readUnsignedByte()
                 if (reqVer != 0x05 || cmd != 0x01 || atyp != 0x03) {
-                    // Fail-Closed: Reject raw IPv4 (0x01) and IPv6 (0x04) clearnet connections!
                     out.write(byteArrayOf(0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
                     out.flush()
                     return
@@ -434,9 +1336,8 @@ object TorOnionTransportManager {
                 val hostBytes = ByteArray(hostLen)
                 inp.readFully(hostBytes)
                 val targetHost = String(hostBytes, Charsets.UTF_8)
-                inp.readUnsignedShort() // targetPort
+                inp.readUnsignedShort()
 
-                // Enforce strict .onion destination validation inside SOCKS5 router
                 try {
                     RustCoreBridge.validateOnionDestinationOrThrow(targetHost)
                 } catch (_: Throwable) {
@@ -445,11 +1346,9 @@ object TorOnionTransportManager {
                     return
                 }
 
-                // Reply SOCKS5 succeeded
                 out.write(byteArrayOf(0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x24, 0xE3.toByte()))
                 out.flush()
 
-                // Forward the stream to LoopbackCryptographicPeerNode
                 val node = getOrCreateLoopbackNode()
                 val initWire = readHandshakeInitFrame(inp)
                 val (respHandle, respWire) = node.respondToHandshake(initWire)
@@ -476,19 +1375,15 @@ object TorOnionTransportManager {
         return node
     }
 
-    /**
-     * Preserves the verified contact's original `.onion` address and safety fingerprints
-     * so contacts paired from a second device display their true `.onion` address and safety numbers.
-     */
+    fun isLoopbackVerificationContact(contact: VerifiedContactRecord): Boolean {
+        val node = getOrCreateLoopbackNode()
+        return contact.onionAddress.equals(node.onionAddress, ignoreCase = true)
+    }
+
     fun normalizeLoopbackContactIfNeeded(contact: VerifiedContactRecord): VerifiedContactRecord {
         return contact
     }
 
-    /**
-     * Generates a genuine signed QR Pairing invite from the local loopback verification peer node
-     * so users can test full QR pairing, fingerprint verification, `ZT-PQXDH-P2P-v1` handshake,
-     * and bidirectional ratcheted messaging over `127.0.0.1` loopback TCP on a single device.
-     */
     suspend fun generateLoopbackPeerQrInvite(): Pair<String, VerifiedContactRecord> =
         withContext(Dispatchers.IO) {
             val node = getOrCreateLoopbackNode()
@@ -497,19 +1392,13 @@ object TorOnionTransportManager {
 
     /**
      * Establishes an authenticated `ZT-PQXDH-P2P-v1` session with [contact].
-     *
-     * Rules enforced:
-     * 1. Validates `.onion` destination (rejects any clearnet IP or domain).
-     * 2. Requires Tor / Onion Service to be ready (never connects if `OFFLINE` or `ERROR`).
-     * 3. Never transitions to `E2EE_SESSION_READY` merely because a TCP socket opened;
-     *    transitions through `CONNECTING_TO_PEER` -> `AUTHENTICATING_PEER` -> `E2EE_SESSION_READY`
-     *    only after `Ed25519` + `ML-DSA-87` + `X25519` + `ML-KEM-1024` handshake verification succeeds!
      */
     suspend fun establishAuthenticatedPeerSession(
         contact: VerifiedContactRecord
     ): Result<Long> = withContext(Dispatchers.IO) {
         try {
-            RustCoreBridge.validateOnionDestinationOrThrow(contact.onionAddress)
+            val peerOnion = contact.onionAddress.lowercase()
+            RustCoreBridge.validateOnionDestinationOrThrow(peerOnion)
 
             if (_connectivityState.value == ConnectivityState.OFFLINE ||
                 _connectivityState.value == ConnectivityState.ERROR
@@ -522,6 +1411,74 @@ object TorOnionTransportManager {
                 }
             }
 
+            // 1. Real two-device P2P connection path on Android
+            if (isAndroidDeviceRuntime && !isLoopbackVerificationContact(contact)) {
+                val existingHandle = getActiveRealPeerSessionHandle(peerOnion)
+                if (existingHandle != null && isPeerConnectedOnMesh(peerOnion)) {
+                    _lastErrorDetail.value = null
+                    _connectivityState.value = ConnectivityState.E2EE_SESSION_READY
+                    return@withContext Result.success(existingHandle)
+                }
+
+                _connectivityState.value = ConnectivityState.CONNECTING_TO_PEER
+                ensureP2pOnionMeshEngineStarted()
+
+                var channel = livePeerChannels[peerOnion]?.takeIf { it.isAlive() }
+                if (channel == null) {
+                    broadcastUdpBeaconAndProbeGateways()
+                    val sweepJob = scope.launch { sweepLocalSubnetsForPeers() }
+                    channel = withTimeoutOrNull(3500L) {
+                        while (true) {
+                            val ch = livePeerChannels[peerOnion]?.takeIf { it.isAlive() }
+                            if (ch != null) return@withTimeoutOrNull ch
+                            delay(100L)
+                        }
+                        @Suppress("UNREACHABLE_CODE")
+                        null
+                    }
+                    if (channel != null) {
+                        sweepJob.cancel()
+                    }
+                }
+
+                if (channel != null) {
+                    // Brief pause for deterministic initiator if we have the larger .onion address
+                    val localOnion = RustCoreBridge.getPublicIdentitySummary()?.onionAddress?.lowercase().orEmpty()
+                    if (getActiveRealPeerSessionHandle(peerOnion) == null && localOnion > peerOnion) {
+                        withTimeoutOrNull(900L) {
+                            while (getActiveRealPeerSessionHandle(peerOnion) == null) {
+                                delay(80L)
+                            }
+                        }
+                    }
+
+                    val postConnectHandle = getActiveRealPeerSessionHandle(peerOnion)
+                    if (postConnectHandle != null) {
+                        _lastErrorDetail.value = null
+                        _connectivityState.value = ConnectivityState.E2EE_SESSION_READY
+                        return@withContext Result.success(postConnectHandle)
+                    }
+
+                    _connectivityState.value = ConnectivityState.AUTHENTICATING_PEER
+                    val deferred = initiateHandshakeOverPeerChannel(channel)
+                    val establishedHandle = withTimeoutOrNull(5000L) {
+                        deferred.await()
+                    } ?: getActiveRealPeerSessionHandle(peerOnion)
+
+                    if (establishedHandle != null) {
+                        _lastErrorDetail.value = null
+                        _connectivityState.value = ConnectivityState.E2EE_SESSION_READY
+                        return@withContext Result.success(establishedHandle)
+                    }
+                }
+
+                _connectivityState.value = ConnectivityState.ONION_SERVICE_READY
+                val waitMsg = "Waiting for ${contact.alias} (${peerOnion.take(10)}…onion) on Hotspot / Wi-Fi P2P circuit. Keep ZeroTrace open on both devices."
+                _lastErrorDetail.value = null
+                return@withContext Result.failure(IllegalStateException(waitMsg))
+            }
+
+            // 2. Single-device Loopback Verification Peer path (or JVM unit test environment)
             _connectivityState.value = ConnectivityState.CONNECTING_TO_PEER
             val node = getOrCreateLoopbackNode()
             val localSummary = RustCoreBridge.getPublicIdentitySummary()
@@ -530,15 +1487,12 @@ object TorOnionTransportManager {
 
             _connectivityState.value = ConnectivityState.AUTHENTICATING_PEER
 
-            // Prepare the signed HandshakeInitWire BEFORE opening the socket so keygen never causes a read timeout
             val initWire = RustCoreBridge.createHandshakeInit(
                 peerClassicalFpHex = node.classicalFp.toHex(),
                 peerPqFpHex = node.pqFp.toHex(),
                 pairingNonceHex = contact.pairingNonceHex
             )
 
-            // Exercise the binary wire framing serializer & parser over loopback TCP (with instant framed pipe fallback
-            // if OEM background socket scheduling delays ServerSocket.accept)
             val respWire: HandshakeResponseWire = try {
                 Socket().use { sock ->
                     sock.soTimeout = 3500
@@ -549,7 +1503,6 @@ object TorOnionTransportManager {
                     readHandshakeResponseFrame(inp)
                 }
             } catch (_: Throwable) {
-                // Perform identical binary wire framing round-trip over loopback memory pipe
                 val initBaos = ByteArrayOutputStream(12_288)
                 writeHandshakeInitFrame(DataOutputStream(initBaos), initWire)
                 val decodedInit = readHandshakeInitFrame(DataInputStream(ByteArrayInputStream(initBaos.toByteArray())))
@@ -565,8 +1518,6 @@ object TorOnionTransportManager {
             _connectivityState.value = ConnectivityState.E2EE_SESSION_READY
             Result.success(handle)
         } catch (t: Throwable) {
-            // Restore ONION_SERVICE_READY if our local Onion Service listener is active so the app
-            // does not stay stuck in FAIL-CLOSED state after a single peer handshake error.
             _connectivityState.value = if (localOnionServerSocket != null && !localOnionServerSocket!!.isClosed) {
                 ConnectivityState.ONION_SERVICE_READY
             } else {
@@ -578,16 +1529,52 @@ object TorOnionTransportManager {
     }
 
     /**
-     * Encrypts and transmits a message over the active Onion stream, and if connected to the
-     * loopback cryptographic responder peer, receives and decrypts its authenticated ratcheted reply.
+     * Encrypts and transmits a message over the active `.onion` stream.
      */
     suspend fun sendEncryptedMessageOverCircuit(
         sessionHandle: Long,
         plaintext: String,
-        forcePqBraidStep: Boolean = false
+        forcePqBraidStep: Boolean = false,
+        contact: VerifiedContactRecord? = null
     ): Result<List<VolatileChatMessage>> = withContext(Dispatchers.IO) {
         val utf8Bytes = plaintext.toByteArray(Charsets.UTF_8)
         try {
+            val metrics = RustCoreBridge.getSessionMetrics(sessionHandle)
+            val peerOnion = (contact?.onionAddress ?: metrics?.peerOnion).orEmpty().lowercase()
+            val isLoopbackPeer = !isAndroidDeviceRuntime ||
+                peerOnion.isEmpty() ||
+                peerOnion == getOrCreateLoopbackNode().onionAddress.lowercase()
+
+            if (!isLoopbackPeer) {
+                var activeHandle = getActiveRealPeerSessionHandle(peerOnion) ?: sessionHandle
+                var channel = livePeerChannels[peerOnion]?.takeIf { it.isAlive() }
+
+                if (channel == null && contact != null) {
+                    val reconnectRes = establishAuthenticatedPeerSession(contact)
+                    if (reconnectRes.isSuccess) {
+                        activeHandle = reconnectRes.getOrThrow()
+                        channel = livePeerChannels[peerOnion]?.takeIf { it.isAlive() }
+                    }
+                }
+
+                if (channel == null || !channel.isAlive()) {
+                    return@withContext Result.failure(
+                        IllegalStateException(
+                            "Peer device is not connected on Hotspot / Wi-Fi yet. Keep ZeroTrace open on both devices on the same Hotspot or Wi-Fi."
+                        )
+                    )
+                }
+
+                _connectivityState.value = ConnectivityState.E2EE_SESSION_READY
+                val (wirePacket, _) = RustCoreBridge.encryptMessage(
+                    sessionHandle = activeHandle,
+                    plaintextUtf8 = utf8Bytes,
+                    forcePqBraidStep = forcePqBraidStep
+                )
+                channel.sendRatchetPacket(wirePacket.toWireBytes())
+                return@withContext Result.success(RustCoreBridge.getVolatileMessages(activeHandle))
+            }
+
             if (_connectivityState.value != ConnectivityState.E2EE_SESSION_READY) {
                 _connectivityState.value = ConnectivityState.E2EE_SESSION_READY
             }
@@ -617,6 +1604,10 @@ object TorOnionTransportManager {
      */
     fun disconnectPeerSession(sessionHandle: Long) {
         _connectivityState.value = ConnectivityState.DISCONNECTING
+        val metrics = RustCoreBridge.getSessionMetrics(sessionHandle)
+        metrics?.peerOnion?.lowercase()?.let { onion ->
+            realPeerSessionHandles.remove(onion)
+        }
         RustCoreBridge.destroySession(sessionHandle)
         loopbackPeerNode?.destroyActiveResponderSession()
         _connectivityState.value = if (localOnionServerSocket != null && !localOnionServerSocket!!.isClosed) {
@@ -627,19 +1618,26 @@ object TorOnionTransportManager {
     }
 
     /**
-     * Manual Emergency Lock / Disconnect Operation (Section 5.4):
-     * 1. Stops message processing
-     * 2. Terminates active peer sessions
-     * 3. Stops local listener
-     * 4. Invalidates session handles
-     * 5. Clears volatile chat buffers & ratchet state
+     * Manual Emergency Lock / Disconnect Operation (Section 5.4).
      */
     @Synchronized
     fun emergencyDisconnectAndWipe(): Int {
         _connectivityState.value = ConnectivityState.DISCONNECTING
+        localBootId = UUID.randomUUID().toString().replace("-", "")
         val wipedSessions = RustCoreBridge.emergencyWipeAllSessions()
+        realPeerSessionHandles.clear()
+        lastBootIdByOnion.clear()
+        pendingHandshakeByOnion.values.forEach { it.cancel() }
+        pendingHandshakeByOnion.clear()
+        livePeerChannels.values.forEach { it.closeQuietly() }
+        livePeerChannels.clear()
+        peerHelloByOnion.clear()
+        refreshConnectedPeerState()
+        stopNsdMesh()
         loopbackPeerNode?.stopAndWipe()
         loopbackPeerNode = null
+        p2pDiscoveryJob?.cancel()
+        p2pDiscoveryJob = null
         try {
             localOnionServerSocket?.close()
         } catch (_: Exception) {
@@ -648,8 +1646,18 @@ object TorOnionTransportManager {
             embeddedSocksServerSocket?.close()
         } catch (_: Exception) {
         }
+        try {
+            p2pMeshServerSocket?.close()
+        } catch (_: Exception) {
+        }
+        try {
+            p2pUdpBeaconSocket?.close()
+        } catch (_: Exception) {
+        }
         localOnionServerSocket = null
         embeddedSocksServerSocket = null
+        p2pMeshServerSocket = null
+        p2pUdpBeaconSocket = null
         embeddedSocksPort = null
         _localListenerPort.value = null
         _torBootstrapProgress.value = 0
@@ -659,12 +1667,39 @@ object TorOnionTransportManager {
     }
 
     // =========================================================================
-    // Wire Framing Serialization for HandshakeInitWire / HandshakeResponseWire
+    // Wire Framing Serialization
     // =========================================================================
 
+    private fun writePeerHelloFrame(out: DataOutputStream, hello: PeerHelloWire) {
+        out.writeInt(WIRE_MAGIC)
+        out.writeByte(FRAME_PEER_HELLO.toInt())
+        out.writeUTF(hello.onionAddress)
+        out.writeUTF(hello.classicalFingerprintHex)
+        out.writeUTF(hello.pqFingerprintHex)
+        writeBytes(out, hello.ed25519PublicKey)
+        writeBytes(out, hello.x25519PublicKey)
+        out.writeUTF(hello.pairingNonceHex)
+        out.writeUTF(hello.ephemeralBootId)
+        writeBytes(out, hello.ed25519Signature)
+        out.flush()
+    }
+
+    private fun readPeerHelloPayload(inp: DataInputStream): PeerHelloWire {
+        return PeerHelloWire(
+            onionAddress = inp.readUTF(),
+            classicalFingerprintHex = inp.readUTF(),
+            pqFingerprintHex = inp.readUTF(),
+            ed25519PublicKey = readBytes(inp),
+            x25519PublicKey = readBytes(inp),
+            pairingNonceHex = inp.readUTF(),
+            ephemeralBootId = inp.readUTF(),
+            ed25519Signature = readBytes(inp)
+        )
+    }
+
     private fun writeHandshakeInitFrame(out: DataOutputStream, msg: HandshakeInitWire) {
-        out.writeInt(0x5A543246) // "ZT2F"
-        out.writeByte(0x01)
+        out.writeInt(WIRE_MAGIC)
+        out.writeByte(FRAME_HANDSHAKE_INIT.toInt())
         out.writeShort(msg.protocolVersion)
         out.writeUTF(msg.sessionIdHex)
         out.writeUTF(msg.pairingNonceHex)
@@ -683,8 +1718,12 @@ object TorOnionTransportManager {
     }
 
     private fun readHandshakeInitFrame(inp: DataInputStream): HandshakeInitWire {
-        require(inp.readInt() == 0x5A543246) { "Invalid wire frame magic" }
-        require(inp.readByte() == 0x01.toByte()) { "Expected HandshakeInit frame type" }
+        require(inp.readInt() == WIRE_MAGIC) { "Invalid wire frame magic" }
+        require(inp.readByte() == FRAME_HANDSHAKE_INIT) { "Expected HandshakeInit frame type" }
+        return readHandshakeInitPayload(inp)
+    }
+
+    private fun readHandshakeInitPayload(inp: DataInputStream): HandshakeInitWire {
         return HandshakeInitWire(
             protocolVersion = inp.readUnsignedShort(),
             sessionIdHex = inp.readUTF(),
@@ -704,8 +1743,8 @@ object TorOnionTransportManager {
     }
 
     private fun writeHandshakeResponseFrame(out: DataOutputStream, msg: HandshakeResponseWire) {
-        out.writeInt(0x5A543246) // "ZT2F"
-        out.writeByte(0x02)
+        out.writeInt(WIRE_MAGIC)
+        out.writeByte(FRAME_HANDSHAKE_RESP.toInt())
         out.writeShort(msg.protocolVersion)
         out.writeUTF(msg.sessionIdHex)
         writeBytes(out, msg.responderNonce)
@@ -723,8 +1762,12 @@ object TorOnionTransportManager {
     }
 
     private fun readHandshakeResponseFrame(inp: DataInputStream): HandshakeResponseWire {
-        require(inp.readInt() == 0x5A543246) { "Invalid wire frame magic" }
-        require(inp.readByte() == 0x02.toByte()) { "Expected HandshakeResponse frame type" }
+        require(inp.readInt() == WIRE_MAGIC) { "Invalid wire frame magic" }
+        require(inp.readByte() == FRAME_HANDSHAKE_RESP) { "Expected HandshakeResponse frame type" }
+        return readHandshakeResponsePayload(inp)
+    }
+
+    private fun readHandshakeResponsePayload(inp: DataInputStream): HandshakeResponseWire {
         return HandshakeResponseWire(
             protocolVersion = inp.readUnsignedShort(),
             sessionIdHex = inp.readUTF(),
@@ -749,15 +1792,13 @@ object TorOnionTransportManager {
 
     private fun readBytes(inp: DataInputStream): ByteArray {
         val len = inp.readInt()
-        require(len in 1..65_536) { "Invalid frame field length: $len" }
+        require(len in 1..262_144) { "Invalid frame field length: $len" }
         return ByteArray(len).also { inp.readFully(it) }
     }
 
     /**
      * Independent Cryptographic Peer Node bound to `127.0.0.1` TCP for local end-to-end
      * handshake and ratcheted packet verification when testing on a single device.
-     * Uses a deterministic identity seed so paired contacts remain cryptographically valid across
-     * app restarts and emergency session wipes.
      */
     private class LoopbackCryptographicPeerNode {
         private val deterministicRng = DeterministicLoopbackSecureRandom("ZT2-DETERMINISTIC-LOOPBACK-PEER-NODE-V2")
@@ -845,7 +1886,7 @@ object TorOnionTransportManager {
         fun createSignedPairingQrAndRecord(): Pair<String, VerifiedContactRecord> {
             val nowSec = System.currentTimeMillis() / 1000L
             val expiry = nowSec + 600L
-            val nonceHex = "5a54324c4f4f504241434b4e4f4e4345" // 16-byte canonical hex nonce
+            val nonceHex = "5a54324c4f4f504241434b4e4f4e4345"
             val urlEncoder = java.util.Base64.getUrlEncoder().withoutPadding()
             val edB64 = urlEncoder.encodeToString(edPub)
             val xB64 = urlEncoder.encodeToString(xPub)

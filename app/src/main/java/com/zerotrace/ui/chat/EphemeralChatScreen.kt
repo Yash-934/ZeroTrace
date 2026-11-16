@@ -79,6 +79,7 @@ import com.zerotrace.ui.components.ContactAvatar
 import com.zerotrace.ui.components.MessageBubble
 import com.zerotrace.ui.components.MessageComposer
 import com.zerotrace.ui.components.ZeroTraceTopBar
+import com.zerotrace.ui.theme.AmberWarning
 import com.zerotrace.ui.theme.ChatWallpaperStyle
 import com.zerotrace.ui.theme.CrimsonDanger
 import com.zerotrace.ui.theme.CyanAccent
@@ -101,6 +102,7 @@ fun EphemeralChatScreen(
     language: AppLanguage,
     peerContact: VerifiedContactRecord?,
     connectivityState: ConnectivityState,
+    isPeerMeshConnected: Boolean,
     richMessages: List<RichConversationMessage>,
     ratchetMetrics: SessionRatchetMetrics?,
     replyingToMessage: RichConversationMessage?,
@@ -109,6 +111,7 @@ fun EphemeralChatScreen(
     isRecordingVoiceNote: Boolean,
     inChatSearchQuery: String,
     wallpaperStyle: ChatWallpaperStyle,
+    statusBanner: String?,
     errorBanner: String?,
     onInChatSearchChange: (String) -> Unit,
     onSendMessage: (String) -> Unit,
@@ -124,9 +127,13 @@ fun EphemeralChatScreen(
     onStartVideoCall: () -> Unit,
     onOpenContactProfile: () -> Unit,
     onTriggerPqBraidStep: () -> Unit,
+    onReconnectPeer: () -> Unit,
+    onBackToChats: () -> Unit,
     onDisconnectAndWipeSession: () -> Unit
 ) {
-    BackHandler(onBack = onDisconnectAndWipeSession)
+    BackHandler(onBack = onBackToChats)
+    val isSessionLive = (ratchetMetrics != null && isPeerMeshConnected) ||
+        connectivityState == ConnectivityState.E2EE_SESSION_READY
     val isHi = language == AppLanguage.HINDI
     var draftText by remember { mutableStateOf("") }
     var searchVisible by remember { mutableStateOf(false) }
@@ -190,18 +197,18 @@ fun EphemeralChatScreen(
                             .clickable { onOpenContactProfile() }
                     ) {
                         IconButton(
-                            onClick = onDisconnectAndWipeSession,
+                            onClick = onBackToChats,
                             modifier = Modifier.testTag("chat_back_wipe_button")
                         ) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Leave & Wipe Session"
+                                contentDescription = "Back to Chats"
                             )
                         }
                         ContactAvatar(
                             alias = peerContact?.alias ?: "Peer",
                             onionAddress = peerContact?.onionAddress ?: "peer.onion",
-                            isOnlineOrSessionActive = connectivityState == ConnectivityState.E2EE_SESSION_READY,
+                            isOnlineOrSessionActive = isSessionLive,
                             size = 40.dp
                         )
                         Spacer(modifier = Modifier.width(10.dp))
@@ -222,11 +229,21 @@ fun EphemeralChatScreen(
                                 )
                             }
                             Text(
-                                text = "Tor E2EE • Epoch ${ratchetMetrics?.ratchetEpoch ?: 1} • Braids ${ratchetMetrics?.pqBraidStepsCompleted ?: 0}",
+                                text = when {
+                                    isSessionLive ->
+                                        "P2P E2EE Live • Epoch ${ratchetMetrics?.ratchetEpoch ?: 1} • Braids ${ratchetMetrics?.pqBraidStepsCompleted ?: 0}"
+                                    else ->
+                                        "Connecting Hotspot/Wi-Fi P2P… (Tap Reconnect)"
+                                },
                                 style = MonospaceStyle.copy(fontSize = 10.sp),
-                                color = EmeraldPrimary,
+                                color = if (isSessionLive) EmeraldPrimary else AmberWarning,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = if (!isSessionLive) {
+                                    Modifier.clickable { onReconnectPeer() }
+                                } else {
+                                    Modifier
+                                }
                             )
                         }
                     }
@@ -354,12 +371,48 @@ fun EphemeralChatScreen(
                     color = CrimsonDanger.copy(alpha = 0.18f),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(
-                        text = errorBanner,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = CrimsonDanger,
-                        modifier = Modifier.padding(10.dp)
-                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = errorBanner,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CrimsonDanger,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = onReconnectPeer) {
+                            Text("Reconnect", color = CrimsonDanger, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
+            if (statusBanner != null) {
+                Surface(
+                    color = AmberWarning.copy(alpha = 0.16f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = statusBanner,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = AmberWarning,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = onReconnectPeer) {
+                            Text("Reconnect", color = EmeraldPrimary, fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
 
@@ -513,7 +566,7 @@ fun EphemeralChatScreen(
                 onDraftChanged = { draftText = it },
                 replyingToMessage = replyingToMessage,
                 onCancelReply = { onReplySelected(null) },
-                canSend = connectivityState == ConnectivityState.E2EE_SESSION_READY,
+                canSend = isSessionLive,
                 isRecordingVoiceNote = isRecordingVoiceNote,
                 onSendClick = {
                     val toSend = draftText.trim()
